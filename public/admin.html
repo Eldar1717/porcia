@@ -1,0 +1,1360 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Панель управления — ПОРЦИЯ</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="admin">
+  <aside class="side">
+    <div class="brand"><span class="mark">П</span>ПОРЦИЯ</div>
+    <button class="on" data-tab="dash">📊 Дашборд</button>
+    <button data-tab="orders">🧾 Заказы</button>
+    <button data-tab="menu">🍔 Меню и стоп-лист</button>
+    <button data-tab="settings">⚙️ Настройки</button>
+    <div class="bottom">
+      <a href="/kiosk" target="_blank">Открыть киоск ↗</a>
+      <a href="/kitchen" target="_blank">Экран кухни ↗</a>
+      <a href="/board" target="_blank">Табло выдачи ↗</a>
+      <a href="/">← На главную сервиса</a>
+    </div>
+  </aside>
+
+  <main class="main" id="main"></main>
+</div>
+
+<script src="/assets/api.js"></script>
+<script>
+const state = { data: null, stats: null, tab: 'dash', orderFilter: 'active' };
+const $ = (s) => document.querySelector(s);
+
+init();
+
+async function init() {
+  await reload();
+  render();
+  setInterval(refreshStats, 8000);
+
+  // Live-события. Важно: страницу целиком не перерисовываем — иначе «прыгают» поля ввода.
+  let statsTimer = null;
+  Porcia.subscribe((type, payload) => {
+    if (type === 'order' && payload) {
+      const i = state.data.orders.findIndex(o => o.id === payload.id);
+      if (i >= 0) state.data.orders[i] = payload; else state.data.orders.unshift(payload);
+      if (state.tab === 'orders') refreshOrders();      // точечное обновление списка
+      if (state.tab === 'dash') scheduleStats();
+    }
+    if (type === 'menu' && payload) {
+      const menuChanged = JSON.stringify(payload.products) !== JSON.stringify(state.data.products)
+        || JSON.stringify(payload.categories) !== JSON.stringify(state.data.categories)
+        || JSON.stringify(payload.settings) !== JSON.stringify(state.data.settings);
+      state.data = payload;
+      if (menuChanged && (state.tab === 'menu' || state.tab === 'settings')) render();
+    }
+    if (type === 'reset') { reload().then(render); }
+  });
+
+  function scheduleStats() {
+    clearTimeout(statsTimer);
+    statsTimer = setTimeout(refreshStats, 400);
+  }
+
+  document.querySelectorAll('.side [data-tab]').forEach(b => {
+    b.onclick = () => {
+      state.tab = b.dataset.tab;
+      document.querySelectorAll('.side [data-tab]').forEach(x => x.classList.toggle('on', x === b));
+      render();
+    };
+  });
+}
+
+async function reload() {
+  state.data = await Porcia.api('GET', '/api/state');
+  state.stats = await Porcia.api('GET', '/api/stats');
+}
+
+async function refreshStats() {
+  try { state.stats = await Porcia.api('GET', '/api/stats'); } catch (e) { }
+  if (state.tab === 'dash' && $('#dashStats')) $('#dashStats').outerHTML = statCardsHtml();
+}
+
+/* ------------------------------------------------------------- дашборд */
+function statCardsHtml() {
+  const s = state.stats || {};
+  return `
+  <div class="stat-grid" id="dashStats">
+    <div class="stat accent">
+      <div class="lbl">Выручка за сегодня</div>
+      <div class="val">${Porcia.money(s.revenueToday)}</div>
+      <div class="sub">оплаченные заказы</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Заказов</div>
+      <div class="val">${s.ordersToday || 0}</div>
+      <div class="sub">позиций: ${s.itemsToday || 0}</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Средний чек</div>
+      <div class="val">${Porcia.money(s.avgCheck)}</div>
+      <div class="sub">по оплаченным</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">В работе</div>
+      <div class="val">${s.inProgress || 0}</div>
+      <div class="sub">на кухне и на выдаче</div>
+    </div>
+    <div class="stat">
+      <div class="lbl">Не оплачено</div>
+      <div class="val">${s.newCount || 0}</div>
+      <div class="sub">ждут оплаты на кассе</div>
+    </div>
+  </div>`;
+}
+
+function barsHtml() {
+  const byHour = (state.stats && state.stats.byHour) || {};
+  const hours = [];
+  for (let h = 8; h <= 22; h++) hours.push(h);
+  const max = Math.max(1, ...hours.map(h => byHour[h] || 0));
+  return `<div class="bars">${hours.map(h => {
+    const v = byHour[h] || 0;
+    return `<div class="b ${v === max && v > 0 ? 'hot' : ''}" title="${v} ₽">
+      <i style="height:${Math.round((v / max) * 100)}%"></i><span>${h}</span></div>`;
+  }).join('')}</div>`;
+}
+
+function topHtml() {
+  const items = (state.stats && state.stats.topItems) || [];
+  if (!items.length) return '<p class="muted" style="font-size:13.5px">Пока нет продаж за сегодня.</p>';
+  return `<table><tbody>${items.map((i, idx) => `<tr>
+    <td style="width:26px;color:var(--ink-3);font-variant-numeric:tabular-nums">${idx + 1}</td>
+    <td>${Porcia.esc(i.name)}</td>
+    <td style="text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${i.qty} шт.</td>
+  </tr>`).join('')}</tbody></table>`;
+}
+
+function renderDash() {
+  const active = state.data.orders.filter(o => ['new', 'paid', 'cooking'].includes(o.status));
+  return `
+  <header>
+    <h1>Дашборд</h1>
+    <span class="pill pill--live pill--green">обновляется в реальном времени</span>
+    <div class="sep"></div>
+    <span class="muted" style="font-size:13px">${new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</span>
+  </header>
+  ${statCardsHtml()}
+  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:18px">
+    <div class="panel">
+      <h2>Выручка по часам <span class="pill">сегодня</span></h2>
+      ${barsHtml()}
+    </div>
+    <div class="panel">
+      <h2>Топ блюд</h2>
+      ${topHtml()}
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Очередь на кухне <span class="sep"></span>
+      <button class="btn btn--sm" onclick="state.tab='orders';document.querySelectorAll('.side [data-tab]').forEach(x=>x.classList.toggle('on',x.dataset.tab==='orders'));render()">Все заказы</button>
+    </h2>
+    ${active.length ? active.slice(0, 6).map(orderRow).join('') : '<p class="muted" style="font-size:13.5px">Сейчас нет заказов в работе.</p>'}
+  </div>`;
+}
+
+/* -------------------------------------------------------------- заказы */
+const STATUS_LABEL = {
+  new: ['Ожидает оплаты', 'pill'], paid: ['Оплачен', 'pill pill--green'],
+  cooking: ['Готовится', 'pill pill--amber'], ready: ['Готов', 'pill pill--green'],
+  done: ['Выдан', 'pill'], cancelled: ['Отменён', 'pill']
+};
+
+function orderRow(o) {
+  const [label, cls] = STATUS_LABEL[o.status] || ['—', 'pill'];
+  return `<div class="order-row">
+    <div>
+      <div class="num">#${o.number}</div>
+      <div class="muted" style="font-size:11.5px">${Porcia.time(o.createdAt)}</div>
+    </div>
+    <div class="it">${o.items.map(i => `${i.qty}× ${Porcia.esc(i.name)}${i.comboId ? ' <span style="color:var(--accent);font-weight:650">комбо</span>' : ''}${i.mods && i.mods.length ? ' <span style="color:var(--ink-3)">(' + i.mods.map(m => Porcia.esc(m.name)).join(', ') + ')</span>' : ''}`).join(' · ')}</div>
+    <span class="${cls}">${label}</span>
+    <div class="sum">${Porcia.money(o.total)}</div>
+    <div class="acts">
+      ${!o.paid && o.status !== 'cancelled' ? `<button class="btn btn--sm btn--accent" data-pay-id="${o.id}">Оплатить</button>` : ''}
+      ${o.status === 'new' ? `<button class="btn btn--sm" data-st="cooking" data-id="${o.id}">На кухню</button>` : ''}
+      ${o.status === 'cooking' ? `<button class="btn btn--sm" data-st="ready" data-id="${o.id}">Готов</button>` : ''}
+      ${o.status === 'ready' ? `<button class="btn btn--sm" data-st="done" data-id="${o.id}">Выдан</button>` : ''}
+      ${['done', 'cancelled'].includes(o.status) ? '' : `<button class="btn btn--sm btn--ghost" data-st="cancelled" data-id="${o.id}">✕</button>`}
+    </div>
+  </div>`;
+}
+
+/** Перерисовка только контейнера заказов (без потери фокуса в других блоках) */
+function refreshOrders() {
+  const panel = document.querySelector('.panel[data-orders]');
+  if (!panel) return render();
+  const f = state.orderFilter;
+  const all = state.data.orders;
+  const list = f === 'active' ? all.filter(o => !['done', 'cancelled'].includes(o.status))
+    : f === 'done' ? all.filter(o => ['done', 'cancelled'].includes(o.status)) : all;
+  panel.innerHTML = list.length ? list.map(orderRow).join('') : '<p class="muted">Заказов нет.</p>';
+  bind();
+}
+
+function renderOrders() {
+  const f = state.orderFilter;
+  const all = state.data.orders;
+  const list = f === 'active' ? all.filter(o => !['done', 'cancelled'].includes(o.status))
+    : f === 'done' ? all.filter(o => ['done', 'cancelled'].includes(o.status)) : all;
+
+  return `
+  <header>
+    <h1>Заказы</h1>
+    <div class="sep"></div>
+    <div class="lang" style="display:inline-flex;background:#ece6de;border-radius:999px;padding:4px;gap:2px">
+      ${[['active', 'В работе'], ['done', 'Завершённые'], ['all', 'Все']].map(([k, l]) =>
+        `<button class="btn btn--sm ${f === k ? 'btn--dark' : 'btn--ghost'}" data-filter="${k}" style="border-radius:999px">${l}</button>`).join('')}
+    </div>
+  </header>
+  <div class="panel" data-orders>
+    ${list.length ? list.map(orderRow).join('') : '<p class="muted">Заказов нет.</p>'}
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- меню */
+let imagesCache = null;
+let modGroupsCache = null;
+
+async function loadImages(force) {
+  if (!imagesCache || force) imagesCache = await Porcia.api('GET', '/api/images');
+  return imagesCache;
+}
+
+function renderMenuTab() {
+  const combos = state.data.combos || [];
+  const cats = state.data.categories;
+  const groups = modGroupsCache || state.data.modGroups;
+  const total = state.data.products.length;
+  const off = state.data.products.filter(p => !p.available).length;
+
+  return `
+  <header>
+    <h1>Меню</h1>
+    <span class="pill">${total} блюд</span>
+    ${off ? `<span class="pill pill--amber">${off} в стоп-листе</span>` : ''}
+    <div class="sep"></div>
+    <button class="btn btn--sm btn--accent" id="addProduct">+ Новое блюдо</button>
+  </header>
+
+  <!-- ------------------------------------------------ категории -->
+  <div class="panel">
+    <h2>Категории <span class="sep"></span>
+      <span class="muted" style="font-size:12.5px;font-weight:500">стрелки меняют порядок в киоске</span>
+    </h2>
+    <div class="cat-list" id="catList">
+      ${cats.map((c, i) => `
+        <div class="cat-row" data-cid="${c.id}">
+          <span class="cat-handle">${i + 1}</span>
+          <input class="inp cat-icon" value="${Porcia.esc(c.icon || '')}" title="Иконка (эмодзи)" maxlength="4">
+          <input class="inp cat-name" value="${Porcia.esc(c.name)}" placeholder="Название категории">
+          <span class="pill">${state.data.products.filter(p => p.categoryId === c.id).length} блюд</span>
+          <div class="cat-acts">
+            <button class="btn btn--sm btn--ghost" data-cat-up="${c.id}" title="Выше" ${i === 0 ? 'disabled' : ''}>↑</button>
+            <button class="btn btn--sm btn--ghost" data-cat-down="${c.id}" title="Ниже" ${i === cats.length - 1 ? 'disabled' : ''}>↓</button>
+            <button class="btn btn--sm" data-cat-save="${c.id}">Сохранить</button>
+            <button class="btn btn--sm btn--ghost" data-cat-del="${c.id}" title="Удалить категорию">✕</button>
+          </div>
+        </div>`).join('')}
+    </div>
+    <div class="add-cat">
+      <input class="inp" id="newCatIcon" placeholder="🍽" maxlength="4" style="width:64px;text-align:center">
+      <input class="inp" id="newCatName" placeholder="Название новой категории, например «Завтраки»" style="flex:1;min-width:220px">
+      <select class="inp" id="newCatPos" style="width:auto">
+        <option value="end">в конец</option>
+        <option value="start">в начало</option>
+        ${cats.map(c => `<option value="${c.id}">после «${Porcia.esc(c.name)}»</option>`).join('')}
+      </select>
+      <button class="btn btn--accent" id="addCat">+ Добавить категорию</button>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------ блюда -->
+  <div class="panel">
+    <h2>Блюда <span class="sep"></span>
+      <input class="inp" id="menuSearch" placeholder="Поиск по названию…" style="width:230px">
+      <select class="inp" id="menuCatFilter" style="width:auto">
+        <option value="">Все категории</option>
+        ${cats.map(c => `<option value="${c.id}">${Porcia.esc(c.name)}</option>`).join('')}
+      </select>
+    </h2>
+    <div class="prod-cards" id="prodCards">${productCards(cats, groups)}</div>
+  </div>
+
+  <div class="panel">
+    <h2>Комбо <span class="pill">${combos.length}</span><span class="sep"></span>
+      <button class="btn btn--sm btn--accent" id="addCombo">+ Новое комбо</button>
+    </h2>
+    <p class="muted" style="font-size:12.5px;margin:-6px 0 14px">
+      Комбо показывается на киоске баннером: гость добавляет весь состав одним касанием по цене комбо.
+    </p>
+    ${combos.length ? `<div class="combo-list">${combos.map(c => {
+      const full = comboFullPrice(c);
+      const saving = full > c.price ? full - c.price : 0;
+      return `<div class="combo-row ${c.enabled ? '' : 'off'}">
+        <div class="combo-thumbs">
+          ${(c.items || []).slice(0, 4).map(it => {
+            const p = state.data.products.find(x => x.id === it.productId);
+            return p && p.image ? `<img src="${Porcia.esc(p.image)}" alt="">` : '';
+          }).join('') || '<span class="muted" style="font-size:12px">нет фото</span>'}
+        </div>
+        <div class="combo-info">
+          <div style="font-weight:700;font-size:15px">${Porcia.esc(c.name)}
+            ${c.badge ? `<span class="pill pill--accent" style="margin-left:6px">${Porcia.esc(c.badge)}</span>` : ''}
+          </div>
+          <div class="muted" style="font-size:12.5px;margin-top:3px">
+            ${(c.items || []).map(it => {
+              const p = state.data.products.find(x => x.id === it.productId);
+              return p ? (it.qty > 1 ? it.qty + '× ' : '') + Porcia.esc(p.name) : '';
+            }).filter(Boolean).join(' + ')}
+          </div>
+        </div>
+        <div class="combo-price">
+          <b>${Porcia.money(c.price)}</b>
+          ${saving ? `<span class="muted">вместо ${Porcia.money(full)} · −${Math.round(saving / full * 100)}%</span>` : ''}
+        </div>
+        <div class="combo-acts">
+          <button class="switch ${c.enabled ? 'on' : ''}" data-combo-toggle="${c.id}" title="Показывать на киоске"><i></i></button>
+          <button class="btn btn--sm" data-combo-edit="${c.id}">Изменить</button>
+          <button class="btn btn--sm btn--ghost" data-combo-del="${c.id}">✕</button>
+        </div>
+      </div>`;
+    }).join('')}</div>` : '<p class="muted" style="font-size:13.5px">Комбо пока нет — создайте первое.</p>'}
+  </div>
+
+  <div class="panel">
+    <h2>Модификаторы <span class="pill">${groups.length}</span><span class="sep"></span>
+      <button class="btn btn--sm btn--accent" id="addModGroup">+ Новая группа</button>
+    </h2>
+    <p class="muted" style="font-size:12.5px;margin:-6px 0 14px">
+      Группы дополнений, которые гость видит в карточке блюда. Цена варианта прибавляется к цене блюда.
+    </p>
+    <div class="mod-grid">
+      ${groups.map(g => `<div class="mod-card" data-gid="${g.id}">
+        <div class="mod-head">
+          <input class="inp mod-name" value="${Porcia.esc(g.name)}" style="font-weight:650">
+          <button class="btn btn--sm" data-modg-save="${g.id}">✓</button>
+          <button class="btn btn--sm btn--ghost" data-modg-del="${g.id}" title="Удалить группу">✕</button>
+        </div>
+        <div class="mod-meta">
+          <select class="inp mod-type" style="width:auto;font-size:12.5px;padding:5px 8px">
+            <option value="single" ${g.type === 'single' ? 'selected' : ''}>один вариант</option>
+            <option value="multi" ${g.type === 'multi' ? 'selected' : ''}>можно несколько</option>
+          </select>
+          <span class="pill">${(g.options || []).length} вар.</span>
+          <span class="pill" title="К скольким блюдам привязана">${state.data.products.filter(p => (p.mods || []).includes(g.id)).length} блюд</span>
+        </div>
+        <div class="mod-opts">
+          ${(g.options || []).map(o => `<div class="mod-opt" data-oid="${o.id}">
+            <input class="inp opt-name" value="${Porcia.esc(o.name)}">
+            <input class="inp opt-price" type="number" min="0" step="10" value="${o.price}" title="Доплата, ₽">
+            <button class="btn btn--sm" data-opt-save="${g.id}:${o.id}">✓</button>
+            <button class="btn btn--sm btn--ghost" data-opt-del="${g.id}:${o.id}">✕</button>
+          </div>`).join('')}
+        </div>
+        <div class="mod-add">
+          <input class="inp new-opt-name" placeholder="Новый вариант">
+          <input class="inp new-opt-price" type="number" min="0" step="10" placeholder="+₽" style="width:86px">
+          <button class="btn btn--sm btn--accent" data-opt-add="${g.id}">+</button>
+        </div>
+      </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+/** Полная цена состава комбо без скидки */
+function comboFullPrice(c) {
+  return (c.items || []).reduce((sum, it) => {
+    const p = state.data.products.find(x => x.id === it.productId);
+    return sum + (p ? p.price * it.qty : 0);
+  }, 0);
+}
+
+/** Карточки блюд с фото и быстрыми действиями */
+function productCards(cats, groups) {
+  const q = (state.menuQuery || '').toLowerCase().trim();
+  const filterCat = state.menuCatFilter || '';
+  const list = state.data.products.filter(p =>
+    (!q || p.name.toLowerCase().includes(q)) && (!filterCat || p.categoryId === filterCat));
+
+  if (!list.length) return '<p class="muted" style="font-size:13.5px">Ничего не найдено — измените поиск или добавьте блюдо.</p>';
+
+  return list.map(p => `
+    <article class="prod ${p.available ? '' : 'off'}" data-pid="${p.id}">
+      <button class="prod-photo" data-photo="${p.id}" title="Изменить фото">
+        ${p.image ? `<img src="${Porcia.esc(p.image)}" alt="">` : '<span>нет фото</span>'}
+        <em>📷 изменить</em>
+      </button>
+      <div class="prod-fields">
+        <input class="inp f-name" value="${Porcia.esc(p.name)}" placeholder="Название">
+        <div class="prod-row">
+          <select class="inp f-cat" style="flex:1">
+            ${cats.map(c => `<option value="${c.id}" ${c.id === p.categoryId ? 'selected' : ''}>${Porcia.esc(c.name)}</option>`).join('')}
+          </select>
+          <input class="inp f-price" type="number" min="0" step="10" value="${p.price}" style="width:96px" title="Цена, ₽">
+        </div>
+        <input class="inp f-desc" value="${Porcia.esc(p.desc || '')}" placeholder="Описание для гостя">
+        <div class="prod-row">
+          <input class="inp f-kcal" type="number" value="${p.kcal || 0}" placeholder="ккал" title="Калорийность">
+          <input class="inp f-protein" type="number" value="${p.protein || 0}" placeholder="белки">
+          <input class="inp f-fat" type="number" value="${p.fat || 0}" placeholder="жиры">
+          <input class="inp f-carbs" type="number" value="${p.carbs || 0}" placeholder="углеводы">
+        </div>
+        <div class="prod-row">
+          <input class="inp f-badge" value="${Porcia.esc(p.badge || '')}" placeholder="Бейдж («Хит»)" style="width:120px">
+          <button class="btn btn--sm ${p.popular ? 'btn--dark' : ''}" data-popular="${p.id}" title="Показывать в «Популярном»">★ Популярное</button>
+        </div>
+        <details class="prod-mods">
+          <summary>Модификаторы: ${(p.mods || []).map(gid => { const g = groups.find(x => x.id === gid); return g ? Porcia.esc(g.name) : ''; }).filter(Boolean).join(', ') || 'нет'}</summary>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+            ${groups.map(g => `<button class="opt ${(p.mods || []).includes(g.id) ? 'on' : ''}" data-mod="${p.id}" data-modg="${g.id}">
+              <span class="dot">✓</span>${Porcia.esc(g.name)}</button>`).join('')}
+          </div>
+        </details>
+      </div>
+      <div class="prod-bottom">
+        <button class="switch ${p.available ? 'on' : ''}" data-avail="${p.id}" title="В продаже / стоп-лист"><i></i></button>
+        <span class="muted" style="font-size:12px;margin-left:8px">${p.available ? 'в продаже' : 'стоп-лист'}</span>
+        <span style="flex:1"></span>
+        <button class="btn btn--sm btn--ghost" data-del="${p.id}">Удалить</button>
+        <button class="btn btn--sm btn--accent" data-save="${p.id}">Сохранить</button>
+      </div>
+    </article>`).join('');
+}
+
+/** Обновление только списка блюд (поиск/фильтр), без перерисовки страницы */
+function refreshProductCards() {
+  const box = document.getElementById('prodCards');
+  if (!box) return;
+  box.innerHTML = productCards(state.data.categories, modGroupsCache || state.data.modGroups);
+  bindProductCards();
+}
+
+async function refreshMenuFromServer() {
+  state.data = await Porcia.api('GET', '/api/state');
+  modGroupsCache = null;
+  render();
+}
+
+/* ------------------------------------------------------------ настройки */
+function renderSettings() {
+  const s = state.data.settings;
+  return `
+  <header><h1>Настройки</h1></header>
+  <div class="panel">
+    <h2>Заведение и киоск</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">
+      <label><span class="lbl-sm">Название заведения</span><input class="inp" id="s-venue" value="${Porcia.esc(s.venue)}"></label>
+      <label><span class="lbl-sm">Адрес</span><input class="inp" id="s-address" value="${Porcia.esc(s.address)}"></label>
+      <label><span class="lbl-sm">Заголовок на экране ожидания</span><input class="inp" id="s-title" value="${Porcia.esc(s.kioskTitle)}"></label>
+      <label><span class="lbl-sm">Подпись на экране ожидания</span><input class="inp" id="s-subtitle" value="${Porcia.esc(s.kioskSubtitle)}"></label>
+      <label><span class="lbl-sm">Среднее время приготовления, мин</span><input class="inp" id="s-eta" type="number" min="1" max="60" value="${s.avgCookingMinutes}"></label>
+      <label><span class="lbl-sm">Способы оплаты</span>
+        <select class="inp" id="s-mode">
+          <option value="both" ${s.serviceMode === 'both' ? 'selected' : ''}>Карта на киоске или на кассе</option>
+          <option value="card" ${s.serviceMode === 'card' ? 'selected' : ''}>Только карта на киоске</option>
+          <option value="counter" ${s.serviceMode === 'counter' ? 'selected' : ''}>Только оплата на кассе</option>
+        </select>
+      </label>
+    </div>
+    <button class="btn btn--accent" style="margin-top:18px" id="saveSettings">Сохранить настройки</button>
+  </div>
+
+  <div class="panel">
+    <h2>Демо-данные</h2>
+    <p class="muted" style="font-size:13.5px;line-height:1.5;max-width:640px">
+      Сброс вернёт стартовое меню и очистит список заказов. Полезно перед показом сервиса заказчику.
+    </p>
+    <button class="btn" style="margin-top:14px" id="resetBtn">Сбросить демо-данные</button>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ render */
+function render() {
+  const main = $('#main');
+  if (state.tab === 'dash') main.innerHTML = renderDash();
+  if (state.tab === 'orders') main.innerHTML = renderOrders();
+  if (state.tab === 'menu') main.innerHTML = renderMenuTab();
+  if (state.tab === 'settings') main.innerHTML = renderSettings();
+  bind();
+}
+
+
+/* ------------------------------------------------- стек модальных окон */
+const modalStack = [];
+
+/** Показать окно поверх остальных: возвращает функцию закрытия */
+function openModal(el, onClose) {
+  const host = document.getElementById('modalHost') || (() => {
+    const h = document.createElement('div');
+    h.id = 'modalHost';
+    document.body.appendChild(h);
+    return h;
+  })();
+  host.appendChild(el);
+  modalStack.push(el);
+  host.style.zIndex = 80 + modalStack.length;
+
+  const close = () => {
+    const i = modalStack.indexOf(el);
+    if (i >= 0) modalStack.splice(i, 1);
+    el.remove();
+    if (typeof onClose === 'function') onClose();
+    if (!modalStack.length) host.style.zIndex = 80;
+  };
+  el._closeModal = close;
+
+  el.querySelectorAll('[data-close]').forEach(b => { b.onclick = close; });
+  el.addEventListener('click', (e) => { if (e.target === el) close(); });
+
+  // окно поверх остальных не должно «съедать» фон предыдущего
+  el.style.animation = 'fade .16s ease';
+  return close;
+}
+
+/* ------------------------------------------------- обработчики меню */
+function bindMenuControls() {
+  bindCombos();
+  bindModGroups();
+  const addCat = $('#addCat');
+  if (addCat) addCat.onclick = async () => {
+    const name = $('#newCatName').value.trim();
+    if (!name) return Porcia.toast('Введите название категории', true);
+    try {
+      await Porcia.api('POST', '/api/categories', {
+        name, icon: $('#newCatIcon').value.trim() || '🍽', position: $('#newCatPos').value
+      });
+      Porcia.toast('Категория добавлена');
+      await refreshMenuFromServer();
+    } catch (e) { Porcia.toast(e.message, true); }
+  };
+
+  if ($('#newCatName')) $('#newCatName').onkeydown = (e) => { if (e.key === 'Enter') addCat.click(); };
+
+  document.querySelectorAll('[data-cat-save]').forEach(b => {
+    b.onclick = async () => {
+      const row = document.querySelector(`.cat-row[data-cid="${b.dataset.catSave}"]`);
+      const name = row.querySelector('.cat-name').value.trim();
+      const icon = row.querySelector('.cat-icon').value.trim();
+      if (!name) return Porcia.toast('Название не может быть пустым', true);
+      try {
+        await Porcia.api('PATCH', '/api/categories/' + b.dataset.catSave, { name, icon });
+        Porcia.toast('Категория сохранена');
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  document.querySelectorAll('[data-cat-del]').forEach(b => {
+    b.onclick = async () => {
+      const cats = state.data.categories;
+      if (cats.length <= 1) return Porcia.toast('Должна остаться хотя бы одна категория', true);
+      const row = document.querySelector(`.cat-row[data-cid="${b.dataset.catDel}"]`);
+      const name = row.querySelector('.cat-name').value;
+      if (!confirm(`Удалить категорию «${name}»?`)) return;
+      try {
+        await Porcia.api('DELETE', '/api/categories/' + b.dataset.catDel);
+        Porcia.toast('Категория удалена');
+        await refreshMenuFromServer();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  const move = async (id, dir) => {
+    const ids = state.data.categories.map(c => c.id);
+    const i = ids.indexOf(id), j = i + dir;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    try {
+      await Porcia.api('POST', '/api/categories/reorder', { ids });
+      await refreshMenuFromServer();
+    } catch (e) { Porcia.toast(e.message, true); }
+  };
+  document.querySelectorAll('[data-cat-up]').forEach(b => { b.onclick = () => move(b.dataset.catUp, -1); });
+  document.querySelectorAll('[data-cat-down]').forEach(b => { b.onclick = () => move(b.dataset.catDown, 1); });
+}
+
+function bindProductCards() {
+  // сохранить блюдо
+  document.querySelectorAll('[data-save]').forEach(b => {
+    b.onclick = async () => {
+      const card = document.querySelector(`.prod[data-pid="${b.dataset.save}"]`);
+      const val = (sel) => card.querySelector(sel) ? card.querySelector(sel).value : '';
+      const body = {
+        name: val('.f-name').trim(),
+        desc: val('.f-desc').trim(),
+        categoryId: val('.f-cat'),
+        price: Number(val('.f-price')) || 0,
+        badge: val('.f-badge').trim(),
+        kcal: Number(val('.f-kcal')) || 0,
+        protein: Number(val('.f-protein')) || 0,
+        fat: Number(val('.f-fat')) || 0,
+        carbs: Number(val('.f-carbs')) || 0
+      };
+      if (!body.name) return Porcia.toast('Название не может быть пустым', true);
+      b.disabled = true;
+      try {
+        const updated = await Porcia.api('PATCH', '/api/products/' + b.dataset.save, body);
+        const i = state.data.products.findIndex(p => p.id === updated.id);
+        if (i >= 0) state.data.products[i] = updated;
+        Porcia.toast('Сохранено');
+        refreshProductCards();
+      } catch (e) { Porcia.toast(e.message, true); b.disabled = false; }
+    };
+  });
+
+  // фото
+  document.querySelectorAll('[data-photo]').forEach(b => {
+    b.onclick = () => openImagePicker(b.dataset.photo);
+  });
+
+  // стоп-лист
+  document.querySelectorAll('[data-avail]').forEach(b => {
+    b.onclick = async () => {
+      const p = state.data.products.find(x => x.id === b.dataset.avail);
+      try {
+        const updated = await Porcia.api('PATCH', '/api/products/' + p.id, { available: !p.available });
+        Object.assign(p, updated);
+        b.classList.toggle('on', p.available);
+        const card = b.closest('.prod');
+        card.classList.toggle('off', !p.available);
+        card.querySelector('.prod-bottom .muted').textContent = p.available ? 'в продаже' : 'стоп-лист';
+        Porcia.toast(p.available ? 'Блюдо в продаже' : 'Блюдо в стоп-листе');
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  // «популярное»
+  document.querySelectorAll('[data-popular]').forEach(b => {
+    b.onclick = async () => {
+      const p = state.data.products.find(x => x.id === b.dataset.popular);
+      try {
+        const updated = await Porcia.api('PATCH', '/api/products/' + p.id, { popular: !p.popular });
+        Object.assign(p, updated);
+        b.classList.toggle('btn--dark', !!p.popular);
+        Porcia.toast(p.popular ? 'Показываем в «Популярном»' : 'Убрали из «Популярного»');
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  // модификаторы блюда
+  document.querySelectorAll('[data-mod]').forEach(b => {
+    b.onclick = async () => {
+      const p = state.data.products.find(x => x.id === b.dataset.mod);
+      const gid = b.dataset.modg;
+      const mods = new Set(p.mods || []);
+      if (mods.has(gid)) mods.delete(gid); else mods.add(gid);
+      try {
+        const updated = await Porcia.api('PATCH', '/api/products/' + p.id, { mods: [...mods] });
+        Object.assign(p, updated);
+        b.classList.toggle('on', mods.has(gid));
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  // удалить блюдо
+  document.querySelectorAll('[data-del]').forEach(b => {
+    b.onclick = async () => {
+      const p = state.data.products.find(x => x.id === b.dataset.del);
+      if (!confirm(`Удалить «${p.name}» из меню?`)) return;
+      try {
+        await Porcia.api('DELETE', '/api/products/' + p.id);
+        state.data.products = state.data.products.filter(x => x.id !== p.id);
+        Porcia.toast('Блюдо удалено');
+        refreshProductCards();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+}
+
+
+
+/** Создание группы модификаторов — небольшое модальное окно вместо prompt */
+function openModGroupEditor() {
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `
+    <div class="modal modal--sm">
+      <div class="modal-head">
+        <h2>Новая группа модификаторов</h2>
+        <button class="close" data-close="1">✕</button>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
+        <label><span class="lbl-sm">Название</span>
+          <input class="inp" id="mgName" placeholder="Например: Соус на выбор" autofocus></label>
+        <label><span class="lbl-sm">Тип выбора</span>
+          <select class="inp" id="mgType">
+            <option value="single">один вариант из списка</option>
+            <option value="multi">можно выбрать несколько</option>
+          </select></label>
+        <label style="display:flex;align-items:center;gap:9px;font-size:13.5px">
+          <button class="switch on" id="mgRequired"><i></i></button>
+          Обязательно выбрать (только для одиночного типа)
+        </label>
+        <div class="muted" style="font-size:12.5px;line-height:1.45">
+          Варианты и доплаты добавите сразу после создания. Затем привяжите группу к блюдам
+          в разделе «Блюда» → «Модификаторы».
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-close="1">Отмена</button>
+        <button class="btn btn--accent" id="mgSave">Создать группу</button>
+      </div>
+    </div>`;
+  const close = openModal(back, null);
+
+  const req = back.querySelector('#mgRequired');
+  req.onclick = () => req.classList.toggle('on');
+  back.querySelector('#mgType').onchange = (e) => {
+    const single = e.target.value === 'single';
+    req.style.opacity = single ? '1' : '.4';
+    req.style.pointerEvents = single ? 'auto' : 'none';
+  };
+
+  const save = async () => {
+    const name = back.querySelector('#mgName').value.trim();
+    if (!name) return Porcia.toast('Введите название группы', true);
+    const btn = back.querySelector('#mgSave');
+    btn.disabled = true;
+    try {
+      await Porcia.api('POST', '/api/modgroups', {
+        name,
+        type: back.querySelector('#mgType').value,
+        required: req.classList.contains('on')
+      });
+      Porcia.toast('Группа создана — добавьте варианты');
+      close();
+      await refreshMenuFromServer();
+    } catch (e) { Porcia.toast(e.message, true); btn.disabled = false; }
+  };
+  back.querySelector('#mgSave').onclick = save;
+  back.querySelector('#mgName').onkeydown = (e) => { if (e.key === 'Enter') save(); };
+  setTimeout(() => back.querySelector('#mgName').focus(), 50);
+}
+
+/* ------------------------------------------------- комбо в панели */
+function bindCombos() {
+  const add = $('#addCombo');
+  if (add) add.onclick = () => openComboEditor(null);
+
+  document.querySelectorAll('[data-combo-edit]').forEach(b => {
+    b.onclick = () => openComboEditor(b.dataset.comboEdit);
+  });
+
+  document.querySelectorAll('[data-combo-toggle]').forEach(b => {
+    b.onclick = async () => {
+      const c = (state.data.combos || []).find(x => x.id === b.dataset.comboToggle);
+      try {
+        const updated = await Porcia.api('PATCH', '/api/combos/' + c.id, { enabled: !c.enabled });
+        Object.assign(c, updated);
+        b.classList.toggle('on', c.enabled);
+        b.closest('.combo-row').classList.toggle('off', !c.enabled);
+        Porcia.toast(c.enabled ? 'Комбо показывается на киоске' : 'Комбо скрыто с киоска');
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  document.querySelectorAll('[data-combo-del]').forEach(b => {
+    b.onclick = async () => {
+      const c = (state.data.combos || []).find(x => x.id === b.dataset.comboDel);
+      if (!confirm(`Удалить комбо «${c.name}»?`)) return;
+      try {
+        await Porcia.api('DELETE', '/api/combos/' + c.id);
+        state.data.combos = state.data.combos.filter(x => x.id !== c.id);
+        Porcia.toast('Комбо удалено');
+        render();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+}
+
+/** Редактор комбо: состав, цена, бейдж, картинка, показ на киоске */
+function openComboEditor(comboId) {
+  const isNew = !comboId;
+  const source = isNew
+    ? { id: null, name: 'Комбо дня', badge: 'Только сегодня', desc: '', price: 0, image: '', enabled: true, items: [] }
+    : JSON.parse(JSON.stringify((state.data.combos || []).find(c => c.id === comboId)));
+  if (!source) return;
+  const draft = source;
+
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `
+    <div class="modal">
+      <div class="modal-head">
+        <h2>${isNew ? 'Новое комбо' : 'Комбо: ' + Porcia.esc(draft.name)}</h2>
+        <button class="close" data-close="1">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="combo-editor">
+          <div class="combo-editor-left">
+            <button class="editor-photo" id="cbPhoto">
+              ${draft.image ? `<img src="${Porcia.esc(draft.image)}" alt="">` : '<span>Фото комбо</span>'}
+              <em>📷 выбрать</em>
+            </button>
+            <label><span class="lbl-sm">Название</span><input class="inp" id="cbName" value="${Porcia.esc(draft.name)}"></label>
+            <label><span class="lbl-sm">Плашка (бейдж)</span><input class="inp" id="cbBadge" value="${Porcia.esc(draft.badge || '')}" placeholder="Только сегодня"></label>
+            <label><span class="lbl-sm">Описание</span><input class="inp" id="cbDesc" value="${Porcia.esc(draft.desc || '')}"></label>
+            <label><span class="lbl-sm">Цена комбо, ₽</span><input class="inp" id="cbPrice" type="number" min="0" step="10" value="${draft.price}"></label>
+            <div class="combo-summary" id="cbSummary"></div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:14px">
+              <button class="switch ${draft.enabled ? 'on' : ''}" id="cbEnabled"><i></i></button> Показывать на киоске
+            </label>
+          </div>
+          <div class="combo-editor-right">
+            <div class="lbl-sm" style="margin-bottom:8px">Состав комбо</div>
+            <div class="combo-items" id="cbItems"></div>
+            <div class="combo-add">
+              <select class="inp" id="cbPick">
+                ${state.data.products.map(p => `<option value="${p.id}">${Porcia.esc(p.name)} — ${p.price} ₽</option>`).join('')}
+              </select>
+              <button class="btn btn--accent" id="cbAddItem">Добавить блюдо</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-close="1">Отмена</button>
+        <button class="btn btn--accent" id="cbSave">${isNew ? 'Создать комбо' : 'Сохранить'}</button>
+      </div>
+    </div>`;
+  const close = openModal(back, null);
+
+  const drawItems = () => {
+    const box = back.querySelector('#cbItems');
+    box.innerHTML = draft.items.length ? draft.items.map((it, i) => {
+      const p = state.data.products.find(x => x.id === it.productId) || { name: '—', price: 0, image: '' };
+      return `<div class="combo-item">
+        ${p.image ? `<img src="${Porcia.esc(p.image)}" alt="">` : '<div class="ph-empty"></div>'}
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${Porcia.esc(p.name)}</div>
+          <div class="muted" style="font-size:12px">${Porcia.money(p.price)} × ${it.qty}</div>
+        </div>
+        <div class="qty" style="background:var(--bg)">
+          <button data-item-dec="${i}">−</button><span>${it.qty}</span><button data-item-inc="${i}">+</button>
+        </div>
+        <button class="btn btn--sm btn--ghost" data-item-del="${i}">✕</button>
+      </div>`;
+    }).join('') : '<p class="muted" style="font-size:13px;padding:14px 0">Пока пусто — добавьте блюда из списка справа.</p>';
+
+    box.querySelectorAll('[data-item-inc]').forEach(b => {
+      b.onclick = () => { draft.items[+b.dataset.itemInc].qty++; drawItems(); };
+    });
+    box.querySelectorAll('[data-item-dec]').forEach(b => {
+      b.onclick = () => {
+        const i = +b.dataset.itemDec;
+        draft.items[i].qty--;
+        if (draft.items[i].qty <= 0) draft.items.splice(i, 1);
+        drawItems();
+      };
+    });
+    box.querySelectorAll('[data-item-del]').forEach(b => {
+      b.onclick = () => { draft.items.splice(+b.dataset.itemDel, 1); drawItems(); };
+    });
+
+    // сумма и подсказка по скидке
+    const full = draft.items.reduce((sum, it) => {
+      const p = state.data.products.find(x => x.id === it.productId);
+      return sum + (p ? p.price * it.qty : 0);
+    }, 0);
+    const price = Number(back.querySelector('#cbPrice').value) || 0;
+    const diff = full - price;
+    back.querySelector('#cbSummary').innerHTML = full
+      ? `<div style="display:flex;justify-content:space-between;font-size:13px"><span class="muted">Состав без скидки</span><b>${Porcia.money(full)}</b></div>
+         <div style="display:flex;justify-content:space-between;font-size:13px;margin-top:4px">
+           <span class="muted">${diff > 0 ? 'Гость экономит' : diff < 0 ? 'Дороже состава на' : 'Скидки нет'}</span>
+           <b style="color:${diff > 0 ? 'var(--green)' : diff < 0 ? 'var(--accent)' : 'var(--ink-3)'}">
+             ${diff !== 0 ? Porcia.money(Math.abs(diff)) : '—'}${diff > 0 ? ` (−${Math.round(diff / full * 100)}%)` : ''}
+           </b></div>`
+      : '<span class="muted" style="font-size:12.5px">Добавьте блюда, чтобы увидеть сумму состава</span>';
+  };
+
+  back.querySelector('#cbPrice').oninput = drawItems;
+  back.querySelector('#cbAddItem').onclick = () => {
+    const pid = back.querySelector('#cbPick').value;
+    const existing = draft.items.find(i => i.productId === pid);
+    if (existing) existing.qty++;
+    else draft.items.push({ productId: pid, qty: 1 });
+    drawItems();
+  };
+  back.querySelector('#cbEnabled').onclick = (e) => {
+    draft.enabled = !draft.enabled;
+    e.currentTarget.classList.toggle('on', draft.enabled);
+  };
+  back.querySelector('#cbPhoto').onclick = () => openImagePicker(null, (url) => {
+    draft.image = url;
+    back.querySelector('#cbPhoto').innerHTML = `<img src="${Porcia.esc(url)}" alt=""><em>📷 изменить</em>`;
+  });
+
+  drawItems();
+
+  back.querySelector('#cbSave').onclick = async () => {
+    const body = {
+      name: back.querySelector('#cbName').value.trim(),
+      badge: back.querySelector('#cbBadge').value.trim(),
+      desc: back.querySelector('#cbDesc').value.trim(),
+      price: Number(back.querySelector('#cbPrice').value) || 0,
+      image: draft.image || '',
+      enabled: !!draft.enabled,
+      items: draft.items.map(i => ({ productId: i.productId, qty: i.qty }))
+    };
+    if (!body.name) return Porcia.toast('Введите название комбо', true);
+    if (!body.items.length) return Porcia.toast('Добавьте хотя бы одно блюдо', true);
+    const btn = back.querySelector('#cbSave');
+    btn.disabled = true;
+    try {
+      if (isNew) await Porcia.api('POST', '/api/combos', body);
+      else await Porcia.api('PATCH', '/api/combos/' + draft.id, body);
+      Porcia.toast(isNew ? 'Комбо создано' : 'Комбо сохранено');
+      close();
+      await refreshMenuFromServer();
+    } catch (e) { Porcia.toast(e.message, true); btn.disabled = false; }
+  };
+}
+
+/* ------------------------------------------- модификаторы в панели */
+function bindModGroups() {
+  const add = $('#addModGroup');
+  if (add) add.onclick = openModGroupEditor;
+
+  document.querySelectorAll('[data-modg-save]').forEach(b => {
+    b.onclick = async () => {
+      const card = b.closest('.mod-card');
+      try {
+        await Porcia.api('PATCH', '/api/modgroups/' + b.dataset.modgSave, {
+          name: card.querySelector('.mod-name').value.trim(),
+          type: card.querySelector('.mod-type').value
+        });
+        Porcia.toast('Группа сохранена');
+        await refreshMenuFromServer();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  document.querySelectorAll('[data-modg-del]').forEach(b => {
+    b.onclick = async () => {
+      const gid = b.dataset.modgDel;
+      const used = state.data.products.filter(p => (p.mods || []).includes(gid)).length;
+      const name = b.closest('.mod-card').querySelector('.mod-name').value;
+      if (!confirm(used
+        ? `Удалить группу «${name}»? Она отвяжется от ${used} блюд (сами блюда останутся).`
+        : `Удалить группу «${name}»?`)) return;
+      try {
+        const r = await Porcia.api('DELETE', '/api/modgroups/' + gid);
+        Porcia.toast(r.detachedFrom ? `Группа удалена, отвязана от ${r.detachedFrom} блюд` : 'Группа удалена');
+        await refreshMenuFromServer();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  document.querySelectorAll('[data-opt-save]').forEach(b => {
+    b.onclick = async () => {
+      const [gid, oid] = b.dataset.optSave.split(':');
+      const row = b.closest('.mod-opt');
+      try {
+        await Porcia.api('PATCH', `/api/modgroups/${gid}/options/${oid}`, {
+          name: row.querySelector('.opt-name').value.trim(),
+          price: Number(row.querySelector('.opt-price').value) || 0
+        });
+        Porcia.toast('Вариант сохранён');
+        await refreshMenuFromServer();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  document.querySelectorAll('[data-opt-del]').forEach(b => {
+    b.onclick = async () => {
+      const [gid, oid] = b.dataset.optDel.split(':');
+      if (!confirm('Удалить вариант?')) return;
+      try {
+        await Porcia.api('DELETE', `/api/modgroups/${gid}/options/${oid}`);
+        Porcia.toast('Вариант удалён');
+        await refreshMenuFromServer();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+
+  document.querySelectorAll('[data-opt-add]').forEach(b => {
+    b.onclick = async () => {
+      const card = b.closest('.mod-card');
+      const name = card.querySelector('.new-opt-name');
+      const price = card.querySelector('.new-opt-price');
+      if (!name.value.trim()) return Porcia.toast('Введите название варианта', true);
+      try {
+        await Porcia.api('POST', `/api/modgroups/${b.dataset.optAdd}/options`, {
+          name: name.value.trim(), price: Number(price.value) || 0
+        });
+        Porcia.toast('Вариант добавлен');
+        await refreshMenuFromServer();
+      } catch (e) { Porcia.toast(e.message, true); }
+    };
+  });
+}
+
+/** Мастер добавления блюда */
+function addProductWizard() {
+  state.newProduct = {
+    name: '', price: 0, categoryId: state.data.categories[0].id, desc: '',
+    image: '', badge: '', kcal: 0, protein: 0, fat: 0, carbs: 0, mods: [], available: true, popular: false
+  };
+  openProductEditor(null);
+}
+
+/** Модальное окно блюда (создание/редактирование) */
+function openProductEditor(pid) {
+  const isNew = !pid;
+  const p = isNew ? state.newProduct : state.data.products.find(x => x.id === pid);
+  if (!p) return;
+  const cats = state.data.categories;
+  const groups = modGroupsCache || state.data.modGroups;
+
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `
+    <div class="modal">
+      <div class="modal-head">
+        <h2>${isNew ? 'Новое блюдо' : 'Блюдо: ' + Porcia.esc(p.name)}</h2>
+        <button class="close" data-close="1">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="editor">
+          <button class="editor-photo" id="edPhoto">
+            ${p.image ? `<img src="${Porcia.esc(p.image)}" alt="">` : '<span>Добавить фото</span>'}
+            <em>📷 выбрать фото</em>
+          </button>
+          <div class="editor-fields">
+            <label><span class="lbl-sm">Название</span><input class="inp" id="edName" value="${Porcia.esc(p.name)}" placeholder="Например, Чизбургер классический"></label>
+            <div style="display:flex;gap:10px">
+              <label style="flex:1"><span class="lbl-sm">Категория</span>
+                <select class="inp" id="edCat">${cats.map(c => `<option value="${c.id}" ${c.id === p.categoryId ? 'selected' : ''}>${Porcia.esc(c.name)}</option>`).join('')}</select>
+              </label>
+              <label style="width:130px"><span class="lbl-sm">Цена, ₽</span><input class="inp" id="edPrice" type="number" min="0" step="10" value="${p.price}"></label>
+            </div>
+            <label><span class="lbl-sm">Описание для гостя</span><input class="inp" id="edDesc" value="${Porcia.esc(p.desc || '')}"></label>
+            <div style="display:flex;gap:10px">
+              <label style="flex:1"><span class="lbl-sm">Бейдж</span><input class="inp" id="edBadge" value="${Porcia.esc(p.badge || '')}" placeholder="Хит / Новинка"></label>
+              <label style="width:100px"><span class="lbl-sm">ккал</span><input class="inp" id="edKcal" type="number" value="${p.kcal || 0}"></label>
+              <label style="width:100px"><span class="lbl-sm">белки</span><input class="inp" id="edProtein" type="number" value="${p.protein || 0}"></label>
+              <label style="width:100px"><span class="lbl-sm">жиры</span><input class="inp" id="edFat" type="number" value="${p.fat || 0}"></label>
+              <label style="width:100px"><span class="lbl-sm">углев.</span><input class="inp" id="edCarbs" type="number" value="${p.carbs || 0}"></label>
+            </div>
+            <div>
+              <span class="lbl-sm">Модификаторы</span>
+              <div style="display:flex;flex-wrap:wrap;gap:8px">
+                ${groups.map(g => `<button class="opt ${(p.mods || []).includes(g.id) ? 'on' : ''}" data-edmod="${g.id}">
+                  <span class="dot">✓</span>${Porcia.esc(g.name)}</button>`).join('')}
+              </div>
+            </div>
+            <div style="display:flex;gap:16px;align-items:center">
+              <label style="display:flex;align-items:center;gap:8px;font-size:14px">
+                <button class="switch ${p.popular ? 'on' : ''}" id="edPopular"><i></i></button> В «Популярное»
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:14px">
+                <button class="switch ${p.available ? 'on' : ''}" id="edAvail"><i></i></button> В продаже
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-close="1">Отмена</button>
+        <button class="btn btn--accent" id="edSave">${isNew ? 'Добавить блюдо' : 'Сохранить'}</button>
+      </div>
+    </div>`;
+  let saved = false;
+  const originalImage = p.image;
+  const close = openModal(back, () => {
+    // если редактор закрыли, не сохранив — возвращаем прежнее фото драфта
+    if (!saved && isNew) p.image = originalImage;
+  });
+
+  back.querySelector('#edPhoto').onclick = () => openImagePicker(null, (url) => {
+    p.image = url;
+    const btn = back.querySelector('#edPhoto');
+    if (btn) btn.innerHTML = `<img src="${Porcia.esc(url)}" alt=""><em>📷 изменить</em>`;
+  });
+
+  back.querySelectorAll('[data-edmod]').forEach(b => {
+    b.onclick = () => {
+      const mods = new Set(p.mods || []);
+      const gid = b.dataset.edmod;
+      if (mods.has(gid)) mods.delete(gid); else mods.add(gid);
+      p.mods = [...mods];
+      b.classList.toggle('on', mods.has(gid));
+    };
+  });
+
+  back.querySelector('#edPopular').onclick = (e) => {
+    p.popular = !p.popular;
+    e.currentTarget.classList.toggle('on', p.popular);
+  };
+  back.querySelector('#edAvail').onclick = (e) => {
+    p.available = !p.available;
+    e.currentTarget.classList.toggle('on', p.available);
+  };
+
+  back.querySelector('#edSave').onclick = async () => {
+    const get = (id) => back.querySelector('#' + id).value;
+    const body = {
+      name: get('edName').trim(),
+      categoryId: get('edCat'),
+      price: Number(get('edPrice')) || 0,
+      desc: get('edDesc').trim(),
+      badge: get('edBadge').trim(),
+      kcal: Number(get('edKcal')) || 0,
+      protein: Number(get('edProtein')) || 0,
+      fat: Number(get('edFat')) || 0,
+      carbs: Number(get('edCarbs')) || 0,
+      mods: p.mods || [],
+      popular: !!p.popular,
+      available: p.available !== false,
+      image: p.image || ''
+    };
+    if (!body.name) return Porcia.toast('Введите название блюда', true);
+    const btn = back.querySelector('#edSave');
+    btn.disabled = true;
+    try {
+      if (isNew) await Porcia.api('POST', '/api/products', body);
+      else await Porcia.api('PATCH', '/api/products/' + p.id, body);
+      saved = true;
+      Porcia.toast(isNew ? 'Блюдо добавлено' : 'Блюдо сохранено');
+      close();
+      await refreshMenuFromServer();
+    } catch (e) { Porcia.toast(e.message, true); btn.disabled = false; }
+  };
+}
+
+/** Выбор фото: библиотека, загрузка файла или ссылка.
+ *  Работает как одно модальное окно: повторные нажатия не создают стопку запросов. */
+async function openImagePicker(pid, onPick) {
+  // если окно выбора фото уже открыто — переиспользуем его, а не плодим новые
+  const existing = document.getElementById('pickerBack');
+  if (existing) {
+    existing.classList.remove('nudge');
+    void existing.offsetWidth;
+    existing.classList.add('nudge');
+    return;
+  }
+  // окно ещё создаётся (ждём список картинок) — повторные клики игнорируем
+  if (state.pickerOpening) return;
+  state.pickerOpening = true;
+  state.pickerBusy = false;
+
+  const apply = onPick || (async (url) => {
+    try {
+      const updated = await Porcia.api('PATCH', '/api/products/' + pid, { image: url });
+      const i = state.data.products.findIndex(p => p.id === updated.id);
+      if (i >= 0) state.data.products[i] = updated;
+      const card = document.querySelector(`.prod[data-pid="${pid}"] .prod-photo`);
+      if (card) card.innerHTML = `<img src="${Porcia.esc(url)}" alt=""><em>📷 изменить</em>`;
+      Porcia.toast('Фото обновлено');
+    } catch (e) { Porcia.toast(e.message, true); }
+  });
+
+  let images = [];
+  try { images = await loadImages(true); } catch (e) { state.pickerOpening = false; throw e; }
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.id = 'pickerBack';
+  back.innerHTML = `
+    <div class="modal modal--sm">
+      <div class="modal-head">
+        <h2>Фото блюда</h2>
+        <button class="close" data-close="1">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="picker-tabs">
+          <button class="btn btn--sm btn--dark" data-tab="lib">Библиотека</button>
+          <button class="btn btn--sm btn--ghost" data-tab="up">Загрузить файл</button>
+          <button class="btn btn--sm btn--ghost" data-tab="url">Ссылка</button>
+        </div>
+
+        <div data-pane="lib">
+          <div class="img-grid">
+            <button class="img-tile" data-url=""><span>без фото</span></button>
+            ${images.map(im => `<button class="img-tile" data-url="${Porcia.esc(im.url)}" title="${Porcia.esc(im.name)}">
+              <img src="${Porcia.esc(im.url)}" alt="${Porcia.esc(im.name)}"></button>`).join('')}
+          </div>
+        </div>
+
+        <div data-pane="up" hidden>
+          <label class="dropzone" id="drop">
+            <input type="file" accept="image/png,image/jpeg,image/webp" id="fileInput" hidden>
+            <span class="big">📤</span>
+            <b>Перетащите файл сюда или нажмите</b>
+            <span class="muted">PNG, JPG или WebP до 6 МБ. Фото 800×800 и больше выглядит лучше всего.</span>
+          </label>
+          <div class="muted" style="font-size:12.5px;margin-top:10px" id="upStatus"></div>
+        </div>
+
+        <div data-pane="url" hidden>
+          <input class="inp" id="urlInput" placeholder="https://… или /assets/burger.jpg">
+          <button class="btn btn--accent btn--sm" style="margin-top:10px" id="urlApply">Применить ссылку</button>
+        </div>
+      </div>
+    </div>`;
+  state.pickerOpening = false;
+  const close = openModal(back, () => {
+    state.pickerBusy = false;
+    state.pickerOpening = false;
+  });
+
+  back.querySelectorAll('.picker-tabs [data-tab]').forEach(b => {
+    b.onclick = () => {
+      back.querySelectorAll('.picker-tabs [data-tab]').forEach(x => {
+        x.classList.toggle('btn--dark', x === b);
+        x.classList.toggle('btn--ghost', x !== b);
+      });
+      back.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.dataset.pane !== b.dataset.tab; });
+    };
+  });
+
+  // одно нажатие = один запрос: пока применяем, остальные клики игнорируются
+  const runOnce = async (url) => {
+    if (state.pickerBusy) return;
+    state.pickerBusy = true;
+    back.querySelectorAll('.img-tile, #urlApply, .dropzone').forEach(el => el.classList.add('busy'));
+    const status = back.querySelector('#upStatus');
+    if (status) status.textContent = 'Сохраняем фото…';
+    try {
+      await apply(url);
+      close();
+    } catch (e) {
+      Porcia.toast(e.message || 'Не удалось сохранить фото', true);
+      if (status) status.textContent = '';
+      state.pickerBusy = false;
+      back.querySelectorAll('.img-tile, #urlApply, .dropzone').forEach(el => el.classList.remove('busy'));
+    }
+  };
+
+  back.querySelectorAll('.img-tile').forEach(t => {
+    t.onclick = () => runOnce(t.dataset.url);
+  });
+
+  const input = back.querySelector('#fileInput');
+  const status = back.querySelector('#upStatus');
+  const upload = async (file) => {
+    if (!file || state.pickerBusy) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return Porcia.toast('Нужен PNG, JPG или WebP', true);
+    if (file.size > 6 * 1024 * 1024) return Porcia.toast('Файл больше 6 МБ', true);
+    status.textContent = 'Обрабатываем фото…';
+    const data = await shrinkImage(file);
+    try {
+      const res = await Porcia.api('POST', '/api/upload', { data });
+      status.textContent = `Загружено (${Math.round(res.size / 1024)} КБ)`;
+      await apply(res.url);
+      close();
+    } catch (e) { status.textContent = ''; Porcia.toast(e.message, true); }
+  };
+  back.querySelector('#drop').addEventListener('click', () => input.click());
+  input.onchange = () => upload(input.files[0]);
+  const drop = back.querySelector('#drop');
+  ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => upload(e.dataTransfer.files[0]));
+
+  back.querySelector('#urlApply').onclick = () => {
+    runOnce(back.querySelector('#urlInput').value.trim());
+  };
+}
+
+/** Сжимаем фото в браузере: максимум 900 px по длинной стороне, JPEG q0.85 */
+function shrinkImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = () => { img.src = reader.result; };
+    reader.onerror = reject;
+    img.onload = () => {
+      const max = 900;
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Применить обновлённый заказ локально и перерисовать только список заказов */
+function applyOrder(updated) {
+  if (!updated || !updated.id) return;
+  const i = state.data.orders.findIndex(o => o.id === updated.id);
+  if (i >= 0) state.data.orders[i] = updated; else state.data.orders.unshift(updated);
+  if (state.tab === 'orders') refreshOrders();
+  if (state.tab === 'dash') refreshStats();
+}
+
+function bind() {
+  // заказы
+  document.querySelectorAll('[data-st]').forEach(b => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const updated = await Porcia.api('POST', '/api/orders/' + b.dataset.id + '/status', { status: b.dataset.st });
+        applyOrder(updated);
+      } catch (e) { Porcia.toast(e.message, true); b.disabled = false; }
+    };
+  });
+  document.querySelectorAll('[data-pay-id]').forEach(b => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const updated = await Porcia.api('POST', '/api/orders/' + b.dataset.payId + '/pay', { method: 'card' });
+        applyOrder(updated);
+        Porcia.toast('Оплата принята');
+      } catch (e) { Porcia.toast(e.message, true); b.disabled = false; }
+    };
+  });
+  document.querySelectorAll('[data-filter]').forEach(b => {
+    b.onclick = () => { state.orderFilter = b.dataset.filter; render(); };
+  });
+
+  // меню
+  if ($('#addProduct')) {
+    $('#addProduct').onclick = addProductWizard;
+    bindMenuControls();
+    bindProductCards();
+    const search = $('#menuSearch'), catFilter = $('#menuCatFilter');
+    if (search) search.oninput = () => { state.menuQuery = search.value; refreshProductCards(); };
+    if (catFilter) catFilter.onchange = () => { state.menuCatFilter = catFilter.value; refreshProductCards(); };
+    loadImages().then(() => { /* прогреваем кеш картинок */ });
+  }
+
+  // настройки
+  const save = $('#saveSettings');
+  if (save) save.onclick = async () => {
+    try {
+      await Porcia.api('PATCH', '/api/settings', {
+        venue: $('#s-venue').value.trim(),
+        address: $('#s-address').value.trim(),
+        kioskTitle: $('#s-title').value.trim(),
+        kioskSubtitle: $('#s-subtitle').value.trim(),
+        avgCookingMinutes: Number($('#s-eta').value) || 7,
+        serviceMode: $('#s-mode').value
+      });
+      Porcia.toast('Настройки сохранены');
+    } catch (e) { Porcia.toast(e.message, true); }
+  };
+  const reset = $('#resetBtn');
+  if (reset) reset.onclick = async () => {
+    if (!confirm('Сбросить демо-данные? Все заказы будут удалены.')) return;
+    await Porcia.api('POST', '/api/reset');
+    Porcia.toast('Демо-данные сброшены');
+  };
+}
+</script>
+</body>
+</html>

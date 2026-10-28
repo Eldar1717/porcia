@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Табло выдачи заказов — ПОРЦИЯ</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="board">
+  <header class="board-head">
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="width:38px;height:38px;border-radius:11px;background:var(--accent);display:grid;place-items:center;font-weight:800;font-size:19px">П</span>
+      <h1 id="venue">ПОРЦИЯ</h1>
+    </div>
+    <span class="pill pill--live" style="background:rgba(255,255,255,.08);color:#58d3a0">онлайн</span>
+    <span class="clock" id="clock">--:--</span>
+  </header>
+
+  <div class="board-main">
+    <div>
+      <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:18px">
+        <h2 style="font-size:19px;text-transform:uppercase;letter-spacing:.16em;color:#9fb0c6">Готовые заказы</h2>
+        <span style="color:#6b7c92;font-size:14px">заберите на стойке выдачи</span>
+      </div>
+      <div class="ready-grid" id="ready"></div>
+    </div>
+
+    <aside class="board-side">
+      <h2>Сейчас готовятся</h2>
+      <div id="cooking" style="flex:1;overflow-y:auto"></div>
+      <div style="font-size:13px;color:#7d8ea4;line-height:1.5;border-top:1px solid rgba(255,255,255,.08);padding-top:12px">
+        Номер заказа появляется на табло, как только блюда собраны на подносе.
+        Если номер пропал — заказ выдан.
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script>
+const state = { orders: [], fresh: new Set(), announced: new Set(), data: null };
+const $ = (s) => document.querySelector(s);
+
+init();
+
+async function init() {
+  state.data = await Porcia.api('GET', '/api/state');
+  state.orders = state.data.orders;
+  $('#venue').textContent = state.data.settings.venue;
+  state.orders.filter(o => o.status === 'ready').forEach(o => state.announced.add(o.id));
+  render();
+  setInterval(tick, 1000);
+  tick();
+  Porcia.subscribe((type, payload) => {
+    if (type === 'order' && payload) {
+      const i = state.orders.findIndex(o => o.id === payload.id);
+      if (i >= 0) state.orders[i] = payload; else state.orders.unshift(payload);
+      if (payload.status === 'ready' && !state.announced.has(payload.id)) {
+        state.announced.add(payload.id);
+        state.fresh.add(payload.id);
+        speak(payload.number);
+        setTimeout(() => { state.fresh.delete(payload.id); render(); }, 6000);
+      }
+      render();
+    }
+    if (type === 'reset') location.reload();
+  });
+}
+
+function tick() {
+  $('#clock').textContent = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  // раз в минуту обновляем «N мин назад»
+  if (!tick.n || Date.now() - tick.n > 30000) { tick.n = Date.now(); render(); }
+}
+
+/* озвучка номера — приятный бонус для зала */
+function speak(number) {
+  if (!('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance('Заказ номер ' + number + ' готов');
+    u.lang = 'ru-RU';
+    u.rate = 0.95;
+    speechSynthesis.speak(u);
+  } catch (e) { /* ignore */ }
+}
+
+function render() {
+  const ready = state.orders.filter(o => o.status === 'ready')
+    .sort((a, b) => new Date(b.readyAt || b.createdAt) - new Date(a.readyAt || a.createdAt));
+  $('#ready').innerHTML = ready.length ? ready.map(o => `
+    <div class="ready-card ${state.fresh.has(o.id) ? 'fresh' : ''}">
+      <div class="label">Готов</div>
+      <div class="num">${o.number}</div>
+      <div class="eta">${Porcia.minsAgo(o.readyAt || o.createdAt)} мин назад</div>
+    </div>`).join('')
+    : `<div class="board-empty" style="grid-column:1/-1;padding:60px 0">Как только заказ будет готов,<br>его номер появится здесь</div>`;
+
+  const cooking = state.orders.filter(o => o.status === 'cooking' || o.status === 'paid' || o.status === 'new')
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  $('#cooking').innerHTML = cooking.length ? cooking.map(o => {
+    const done = o.status === 'cooking';
+    return `<div class="cook-row">
+      <span class="n">${o.number}</span>
+      <span style="font-size:13px;color:#8fa3ba">${done ? 'готовится' : 'в очереди'}</span>
+      <span class="dots">${[1, 2, 3, 4].map(i => `<i class="${done && i <= 2 ? 'on' : ''}"></i>`).join('')}</span>
+    </div>`;
+  }).join('') : '<div style="color:#6b7c92;font-size:15px;padding:10px 0">Очередь пуста</div>';
+}
+</script>
+</body>
+</html>

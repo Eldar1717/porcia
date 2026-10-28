@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ПОРЦИЯ — сервис заказов для заведений: киоск, кухня, выдача</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<div class="launch">
+  <header class="launch-hero">
+    <div class="row">
+      <div class="logo"><span class="mark">П</span>ПОРЦИЯ</div>
+      <span class="pill" style="background:rgba(255,255,255,.12);color:#fff">сервис заказов</span>
+      <div class="sep"></div>
+      <span class="pill pill--live" style="background:rgba(255,255,255,.12);color:#7ff0bd">сервер работает</span>
+    </div>
+    <h1>Гость заказывает сам.<br>Заказ сразу на кухне.</h1>
+    <p class="lead">
+      Киоск самообслуживания, экран кухни, табло выдачи и панель управления — один сервис.
+      Меню, стоп-листы и статусы заказов синхронизируются в реальном времени.
+    </p>
+  </header>
+
+  <div class="launch-wrap">
+    <div class="launch-cards">
+      <a class="lcard" href="/kiosk" target="_blank">
+        <span class="ic">🖥️</span>
+        <h3>Киоск самообслуживания</h3>
+        <p>Меню с фото, модификаторы, корзина, оплата картой и печать номера заказа.</p>
+        <span class="go">Открыть киоск →</span>
+      </a>
+      <a class="lcard" href="/kitchen" target="_blank">
+        <span class="ic">👨‍🍳</span>
+        <h3>Экран кухни (KDS)</h3>
+        <p>Заказы приходят моментально, таймеры, звук нового заказа, статусы приготовления.</p>
+        <span class="go">Открыть кухню →</span>
+      </a>
+      <a class="lcard" href="/board" target="_blank">
+        <span class="ic">🔔</span>
+        <h3>Табло выдачи</h3>
+        <p>Номера готовых заказов крупным планом, очередь на кухне и голосовое оповещение.</p>
+        <span class="go">Открыть табло →</span>
+      </a>
+      <a class="lcard" href="/demo" target="_blank">
+        <span class="ic">🪄</span>
+        <h3>Демо в одном окне</h3>
+        <p>Киоск, кухня и табло выдачи рядом: оформите заказ и посмотрите весь путь.</p>
+        <span class="go">Запустить сценарий →</span>
+      </a>
+      <a class="lcard" href="/admin" target="_blank">
+        <span class="ic">📊</span>
+        <h3>Панель управления</h3>
+        <p>Выручка, средний чек, топ блюд, заказы, стоп-листы и настройки заведения.</p>
+        <span class="go">Открыть панель →</span>
+      </a>
+    </div>
+
+    <section class="launch-sect">
+      <h2>Как это работает</h2>
+      <div class="flow">
+        <div><span class="n">Шаг 1</span><b>Гость собирает заказ</b>Выбирает блюда и добавки на киоске, видит состав и калорийность.</div>
+        <div><span class="n">Шаг 2</span><b>Оплачивает картой</b>Эквайринг на киоске или оплата на кассе — настраивается в панели.</div>
+        <div><span class="n">Шаг 3</span><b>Кухня видит заказ</b>Тикет появляется на экране кухни со звуком и таймером, статус меняется в один клик.</div>
+        <div><span class="n">Шаг 4</span><b>Номер на табло</b>Как только заказ готов, его номер появляется на табло выдачи и озвучивается.</div>
+      </div>
+    </section>
+
+    <section class="launch-sect">
+      <h2>Что внутри сервиса</h2>
+      <div class="flow">
+        <div><b>Единое меню</b>Категории, цены, описания, КБЖУ и модификаторы — одна модель данных для всех экранов.</div>
+        <div><b>Стоп-лист в один клик</b>Выключили блюдо в панели — оно мгновенно исчезло из киоска.</div>
+        <div><b>Live-статусы</b>Обновления идут через SSE: киоск, кухня, табло и панель видят одно и то же.</div>
+        <div><b>Номера заказов</b>Сквозная нумерация, чека и история статусов по каждому заказу.</div>
+        <div><b>Аналитика дня</b>Выручка, количество заказов, средний чек и топ позиций по часам.</div>
+        <div><b>Данные на диске</b>Заказы и меню хранятся в <code>data/db.json</code> — легко подключить iiko или 1С.</div>
+      </div>
+    </section>
+  </div>
+
+  <footer class="launch-foot">
+    <div class="hint">
+      💡 <span>Совет для демонстрации: откройте <a href="/demo" style="text-decoration:underline">демо в одном окне</a> — киоск, кухня и табло рядом. Оформите заказ на киоске: тикет появится на кухне моментально, а после «Готово — на выдачу» номер всплывёт на табло и озвучится.</span>
+    </div>
+    ПОРЦИЯ · демо-стенд сервиса заказов · Node.js без зависимостей · API: <code>/api/state</code>, <code>/api/orders</code>, <code>/api/events</code>
+  </footer>
+</div>
+</body>
+</html>

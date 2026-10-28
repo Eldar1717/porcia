@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Киоск самообслуживания — ПОРЦИЯ</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="kiosk-body">
+
+<div class="kiosk">
+  <header class="k-head">
+    <div class="k-logo"><span class="mark">П</span><span id="venueName">ПОРЦИЯ</span></div>
+    <div class="k-meta"><span>Режим</span><b id="modeLabel">Самообслуживание</b></div>
+    <div class="sep"></div>
+    <div class="k-meta k-meta--right"><span>Ваш заказ</span><b id="headTotal">0 ₽</b></div>
+    <div class="clock" id="clock">--:--</div>
+  </header>
+
+  <nav class="k-rail" id="rail"></nav>
+
+  <main class="k-menu" id="menu">
+    <div id="heroBox"></div>
+    <div id="sections"></div>
+  </main>
+
+  <aside class="k-cart">
+    <header>
+      <h3>Ваш заказ</h3>
+      <span class="pill" id="cartCount">0</span>
+    </header>
+    <div class="items" id="cartItems">
+      <div class="k-empty">
+        <div class="big">🛍️</div>
+        <p>Корзина пуста.<br>Выберите блюда из меню —<br>заказ сразу уйдёт на кухню.</p>
+      </div>
+    </div>
+    <footer>
+      <div class="totrow">
+        <div>
+          <div class="hint" id="cartHint">Без скидок и сборов</div>
+          <div class="hint" style="margin-top:2px" id="etaHint">Готовность ~7 минут</div>
+        </div>
+        <div class="sum" id="cartTotal">0 ₽</div>
+      </div>
+      <button class="btn btn--accent btn--lg btn--block" id="checkoutBtn" disabled>Оплатить</button>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn--ghost btn--sm" id="clearBtn" style="flex:1">Очистить</button>
+        <button class="btn btn--ghost btn--sm" id="attractBtn" style="flex:1">Экран ожидания</button>
+      </div>
+    </footer>
+  </aside>
+</div>
+
+<div id="overlays"></div>
+
+<script src="/assets/api.js"></script>
+<script>
+/* ------------------------------------------------------------------ state */
+const state = {
+  data: null,
+  cart: [],            // { key, productId, name, price, qty, mods:[{groupId,optionId,name,price}], image }
+  activeCat: 'popular',
+  sheet: null,         // { product, sel: {groupId:[optionId]}, qty }
+  overlay: null,       // 'pay' | 'done' | 'attract'
+  lastOrder: null,
+  paying: false
+};
+
+const CAT_PRODUCT_LIMIT = 24;
+const $ = (sel) => document.querySelector(sel);
+
+/* ------------------------------------------------------------------- boot */
+init();
+
+async function init() {
+  try {
+    state.data = await Porcia.api('GET', '/api/state');
+  } catch (e) {
+    document.body.innerHTML = '<div style="padding:40px;font:16px sans-serif">Не удалось загрузить меню. Обновите страницу.</div>';
+    return;
+  }
+  $('#venueName').textContent = state.data.settings.venue;
+  $('#etaHint').textContent = 'Готовность ~' + (state.data.settings.avgCookingMinutes || 7) + ' минут';
+  renderRail();
+  renderHero();
+  renderMenu();
+  renderCart();
+  tickClock();
+  setInterval(tickClock, 1000);
+
+  Porcia.subscribe((type, payload) => {
+    if (type === 'menu' || type === 'reset') {
+      state.data = payload || state.data;
+
+      // категорию могли удалить или переименовать — пересобираем навигацию
+      if (!state.data.categories.some(c => c.id === state.activeCat)) {
+        state.activeCat = state.data.categories[0] ? state.data.categories[0].id : 'popular';
+      }
+      renderRail();
+      renderHero();
+
+      // блюдо могли убрать из меню или поставить в стоп-лист
+      const gone = state.cart.filter(l => {
+        const p = state.data.products.find(x => x.id === l.productId);
+        return !p || !p.available;
+      });
+      if (gone.length) {
+        state.cart = state.cart.filter(l => !gone.includes(l));
+        Porcia.toast('Часть блюд закончилась и удалена из заказа', true);
+        renderCart();
+      }
+      renderMenu();
+      renderCart();
+    }
+    if (type === 'order' && payload) {
+      if (state.lastOrder && payload.id === state.lastOrder.id) state.lastOrder = payload;
+    }
+  });
+
+  // события
+  $('#checkoutBtn').onclick = startCheckout;
+  $('#clearBtn').onclick = () => { state.cart = []; renderCart(); };
+  $('#attractBtn').onclick = () => { state.overlay = 'attract'; renderOverlay(); };
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeOverlay(); });
+}
+
+function tickClock() {
+  $('#clock').textContent = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+/* ------------------------------------------------------------------- menu */
+function renderRail() {
+  const rail = $('#rail');
+  rail.innerHTML = state.data.categories.map(c => `
+    <button class="${state.activeCat === c.id ? 'on' : ''}" data-cat="${c.id}">
+      <span class="ic">${c.icon || '•'}</span>${Porcia.esc(c.name)}
+    </button>`).join('');
+  rail.querySelectorAll('button').forEach(b => {
+    b.onclick = () => {
+      state.activeCat = b.dataset.cat;
+      renderRail();
+      renderMenu();
+      $('#menu').scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  });
+}
+
+function productsFor(catId) {
+  const all = state.data.products;
+  if (catId === 'popular') {
+    const pop = all.filter(p => p.popular);
+    const rest = all.filter(p => !p.popular);
+    return { pop, rest };
+  }
+  return { pop: all.filter(p => p.categoryId === catId), rest: [] };
+}
+
+function tile(p) {
+  const inCart = state.cart.filter(l => l.productId === p.id).reduce((s, l) => s + l.qty, 0);
+  return `
+  <button class="tile ${p.available ? '' : 'off'}" data-pid="${p.id}">
+    <div class="ph">
+      ${p.image ? `<img src="${Porcia.esc(p.image)}" alt="" loading="lazy">` : ''}
+      ${p.badge ? `<span class="badge">${Porcia.esc(p.badge)}</span>` : ''}
+      ${inCart ? `<span class="pill" style="position:absolute;top:8px;right:8px;background:#fff">${inCart}</span>` : ''}
+    </div>
+    <h4>${Porcia.esc(p.name)}</h4>
+    <div class="desc">${Porcia.esc(p.desc)}</div>
+    <div class="row">
+      <span class="price">${Porcia.money(p.price)}</span>
+      <span class="add">+</span>
+    </div>
+    ${p.available ? '' : '<span class="off-flag">Закончилось</span>'}
+  </button>`;
+}
+
+function renderMenu() {
+  const cat = state.data.categories.find(c => c.id === state.activeCat) || state.data.categories[0];
+  const { pop, rest } = productsFor(state.activeCat);
+  let html = '';
+
+  if (state.activeCat === 'popular') {
+    html += `<div class="k-sect-title"><h3>Популярное</h3><span>${pop.length} блюд</span></div>
+             <div class="k-grid">${pop.slice(0, CAT_PRODUCT_LIMIT).map(tile).join('')}</div>`;
+    if (rest.length) {
+      const cats = state.data.categories.filter(c => c.id !== 'popular' && rest.some(p => p.categoryId === c.id));
+      for (const c of cats) {
+        html += `<div class="k-sect-title" style="margin-top:26px"><h3>${Porcia.esc(c.name)}</h3><span>${rest.filter(p => p.categoryId === c.id).length} блюд</span></div>
+                 <div class="k-grid">${rest.filter(p => p.categoryId === c.id).map(tile).join('')}</div>`;
+      }
+    }
+  } else {
+    html += `<div class="k-sect-title"><h3>${Porcia.esc(cat.name)}</h3><span>${pop.length} блюд</span></div>
+             <div class="k-grid">${pop.map(tile).join('') || '<p class="muted">В этой категории пока нет блюд.</p>'}</div>`;
+  }
+  $('#sections').innerHTML = html;
+
+  $('#sections').querySelectorAll('.tile').forEach(el => {
+    el.onclick = () => openProduct(el.dataset.pid);
+  });
+}
+
+/* ---------------------------------------------------------------- product */
+function openProduct(pid) {
+  const p = state.data.products.find(x => x.id === pid);
+  if (!p || !p.available) return;
+  const sel = {};
+  (p.mods || []).forEach(gid => {
+    const g = state.data.modGroups.find(m => m.id === gid);
+    if (!g) return;
+    sel[gid] = g.type === 'single' && g.options[0] ? [g.options[0].id] : [];
+  });
+  state.sheet = { product: p, sel, qty: 1 };
+  renderOverlay();
+}
+
+function modsPrice(p, sel) {
+  let sum = 0;
+  Object.entries(sel).forEach(([gid, opts]) => {
+    const g = state.data.modGroups.find(m => m.id === gid);
+    if (!g) return;
+    opts.forEach(oid => {
+      const o = g.options.find(x => x.id === oid);
+      if (o) sum += o.price;
+    });
+  });
+  return sum;
+}
+
+function sheetHtml() {
+  const { product: p, sel, qty } = state.sheet;
+  const unit = p.price + modsPrice(p, sel);
+  const groups = (p.mods || []).map(gid => {
+    const g = state.data.modGroups.find(m => m.id === gid);
+    if (!g) return '';
+    const opts = g.options.map(o => {
+      const on = (sel[gid] || []).includes(o.id);
+      return `<button class="opt ${on ? 'on' : ''}" data-g="${gid}" data-o="${o.id}" data-type="${g.type}">
+        <span class="dot">✓</span>${Porcia.esc(o.name)}
+        ${o.price ? `<span class="add-price">+${o.price} ₽</span>` : ''}
+      </button>`;
+    }).join('');
+    return `<div class="mgroup">
+      <div class="mh"><h4>${Porcia.esc(g.name)}</h4>
+        <span class="pill">${g.type === 'single' ? 'один вариант' : 'можно несколько'}</span></div>
+      <div class="opts">${opts}</div>
+    </div>`;
+  }).join('');
+
+  return `<div class="sheet-back" data-back="1">
+    <div class="sheet">
+      <div class="top">
+        ${p.image ? `<img src="${Porcia.esc(p.image)}" alt="">` : '<div style="width:180px;height:180px;border-radius:20px;background:#f1ece5"></div>'}
+        <div style="flex:1">
+          <h3>${Porcia.esc(p.name)}</h3>
+          <p class="desc">${Porcia.esc(p.desc || '')}</p>
+          <div class="nutri">
+            <div><b>${p.kcal || 0}</b>ккал</div>
+            <div><b>${p.protein || 0}</b>белки</div>
+            <div><b>${p.fat || 0}</b>жиры</div>
+            <div><b>${p.carbs || 0}</b>углеводы</div>
+          </div>
+        </div>
+        <button class="close" data-close="1">✕</button>
+      </div>
+      <div class="body">${groups || '<p class="muted" style="padding:16px 0">Без вариантов — просто добавьте в заказ.</p>'}</div>
+      <div class="foot">
+        <div class="qty">
+          <button data-q="-1">−</button><span>${qty}</span><button data-q="1">+</button>
+        </div>
+        <button class="btn btn--accent btn--lg" data-add="1">Добавить · ${Porcia.money(unit * qty)}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* -------------------------------------------------------------- cart ops */
+function cartKey(pid, sel) {
+  const flat = Object.entries(sel)
+    .map(([g, opts]) => g + ':' + opts.slice().sort().join(',')).sort().join('|');
+  return pid + '#' + flat;
+}
+
+function addToCart(product, sel, qty) {
+  const mods = [];
+  Object.entries(sel || {}).forEach(([gid, opts]) => {
+    const g = state.data.modGroups.find(m => m.id === gid);
+    if (!g) return;
+    opts.forEach(oid => {
+      const o = g.options.find(x => x.id === oid);
+      if (o) mods.push({ groupId: gid, optionId: oid, name: o.name, price: o.price });
+    });
+  });
+  const key = cartKey(product.id, sel || {});
+  const existing = state.cart.find(l => l.key === key);
+  const unit = product.price + mods.reduce((s, m) => s + m.price, 0);
+  if (existing) existing.qty += qty;
+  else state.cart.push({
+    key, productId: product.id, name: product.name, price: unit, qty,
+    mods, image: product.image
+  });
+  renderCart();
+  Porcia.toast(product.name + ' — в заказе');
+}
+
+/** Комбо из настроек: состав, цена и картинки берутся из панели управления */
+function activeCombos() {
+  return (state.data.combos || []).filter(c => c.enabled && (c.items || []).length);
+}
+
+function comboPrice(c) {
+  return (c.items || []).reduce((sum, it) => {
+    const p = state.data.products.find(x => x.id === it.productId);
+    return sum + (p ? p.price * it.qty : 0);
+  }, 0);
+}
+
+function comboImages(c) {
+  return (c.items || []).slice(0, 3).map(it => {
+    const p = state.data.products.find(x => x.id === it.productId);
+    return p && p.image ? p.image : '';
+  }).filter(Boolean);
+}
+
+function renderHero() {
+  const combos = activeCombos();
+  const box = $('#heroBox');
+  if (!combos.length) { box.innerHTML = ''; return; }
+  const c = combos[0];
+  const imgs = comboImages(c);
+  const full = comboPrice(c);
+  const saving = full > c.price ? full - c.price : 0;
+
+  box.innerHTML = `
+    <div class="k-hero">
+      <div>
+        ${c.badge ? `<span class="pill" style="background:rgba(255,255,255,.14);color:#fff">${Porcia.esc(c.badge)}</span>` : ''}
+        <h2 style="margin-top:12px">${Porcia.esc(c.name)}</h2>
+        <p>${Porcia.esc(c.desc || (c.items || []).map(it => {
+          const p = state.data.products.find(x => x.id === it.productId);
+          return p ? (it.qty > 1 ? it.qty + '× ' : '') + p.name : '';
+        }).filter(Boolean).join(' + '))}</p>
+      </div>
+      <div class="combo" role="button" tabindex="0" data-combo="${c.id}">
+        ${imgs.map(src => `<img src="${Porcia.esc(src)}" alt="">`).join('')}
+        <div style="text-align:left">
+          <b>${Porcia.money(c.price)}</b>
+          ${saving ? `<span>вместо ${Porcia.money(full)}</span>` : '<span>состав в один клик</span>'}
+        </div>
+      </div>
+    </div>`;
+
+  box.querySelector('[data-combo]').onclick = () => addCombo(c.id);
+}
+
+function addCombo(comboId) {
+  const c = (state.data.combos || []).find(x => x.id === comboId) || activeCombos()[0];
+  if (!c) return;
+  const full = comboPrice(c);
+  const ratio = full > 0 ? c.price / full : 1;   // скидка распределяется на позиции
+  let added = 0;
+
+  // сначала считаем целые цены позиций, остаток от округления доводим до цены комбо
+  const plan = [];
+  for (const it of c.items || []) {
+    const p = state.data.products.find(x => x.id === it.productId);
+    if (!p || !p.available) continue;
+    plan.push({ it, p, price: Math.round(p.price * ratio) });
+  }
+  let delta = c.price - plan.reduce((s, x) => s + x.price * x.it.qty, 0);
+  const singles = plan.filter(x => x.it.qty === 1);
+  for (const x of singles) {
+    if (!delta) break;
+    const step = delta > 0 ? 1 : -1;
+    x.price += step;
+    delta -= step;
+  }
+  if (delta && plan.length) plan[plan.length - 1].price += delta;   // редкий случай: qty > 1
+
+  for (const { it, p, price: linePrice } of plan) {
+    const p = state.data.products.find(x => x.id === it.productId);
+    if (!p || !p.available) continue;
+    const sel = {};
+    (p.mods || []).forEach(gid => {
+      const g = state.data.modGroups.find(m => m.id === gid);
+      if (g && g.type === 'single' && g.options[0]) sel[gid] = [g.options[0].id];
+    });
+    const mods = [];
+    Object.entries(sel).forEach(([gid, opts]) => opts.forEach(oid => {
+      const g = state.data.modGroups.find(m => m.id === gid);
+      const o = g && g.options.find(x => x.id === oid);
+      if (o) mods.push({ groupId: gid, optionId: oid, name: o.name, price: 0 });
+    }));
+    const modsSum = mods.reduce((s, m) => s + m.price, 0);
+    const key = cartKey(p.id, sel) + '#combo:' + c.id;
+    const existing = state.cart.find(l => l.key === key);
+    if (existing) existing.qty += it.qty;
+    else state.cart.push({
+      key, productId: p.id, name: p.name, price: linePrice + modsSum, qty: it.qty, mods,
+      image: p.image, comboId: c.id, basePrice: linePrice
+    });
+    added += it.qty;
+  }
+
+  if (!added) { Porcia.toast('Блюда из комбо закончились', true); return; }
+  renderCart();
+  Porcia.toast(c.name + ' — в заказе');
+}
+
+function renderCart() {
+  const count = state.cart.reduce((s, l) => s + l.qty, 0);
+  const total = state.cart.reduce((s, l) => s + l.price * l.qty, 0);
+  $('#cartCount').textContent = count;
+  $('#headTotal').textContent = Porcia.money(total);
+  $('#cartTotal').textContent = Porcia.money(total);
+  $('#checkoutBtn').disabled = count === 0;
+  $('#checkoutBtn').textContent = count ? 'Оплатить · ' + Porcia.money(total) : 'Оплатить';
+
+  const box = $('#cartItems');
+  if (!count) {
+    box.innerHTML = `<div class="k-empty"><div class="big">🛍️</div>
+      <p>Корзина пуста.<br>Выберите блюда из меню —<br>заказ сразу уйдёт на кухню.</p></div>`;
+    return;
+  }
+  box.innerHTML = state.cart.map(l => `
+    <div class="citem" data-key="${Porcia.esc(l.key)}">
+      ${l.image ? `<img src="${Porcia.esc(l.image)}" alt="">` : ''}
+      <div class="info">
+        <div class="name">${Porcia.esc(l.name)}</div>
+        ${l.mods.length ? `<div class="mods">${l.mods.map(m => Porcia.esc(m.name)).join(' · ')}</div>` : ''}
+        <div class="bottom">
+          <div class="qty">
+            <button data-op="-1">−</button><span>${l.qty}</span><button data-op="1">+</button>
+          </div>
+          <span class="price">${Porcia.money(l.price * l.qty)}</span>
+        </div>
+      </div>
+    </div>`).join('');
+
+  box.querySelectorAll('.citem').forEach(el => {
+    const key = el.dataset.key;
+    el.querySelectorAll('[data-op]').forEach(b => {
+      b.onclick = () => {
+        const line = state.cart.find(l => l.key === key);
+        if (!line) return;
+        line.qty += Number(b.dataset.op);
+        if (line.comboId) {
+          // в комбо цена уже со скидкой: единичная цена не должна «уезжать»
+          line.price = line.basePrice + line.mods.reduce((s, m) => s + m.price, 0);
+        }
+        if (line.qty <= 0) state.cart = state.cart.filter(l => l.key !== key);
+        renderCart();
+        if (state.sheet) renderOverlay();
+      };
+    });
+  });
+}
+
+/* ---------------------------------------------------------------- checkout */
+function startCheckout() {
+  if (!state.cart.length) return;
+  const total = state.cart.reduce((s, l) => s + l.price * l.qty, 0);
+  state.overlay = 'pay';
+  state.payTotal = total;
+  const mode = state.data.settings.serviceMode;
+  if (mode === 'both') {
+    state.payStep = 'method';
+    renderOverlay();
+  } else {
+    // в заведении выбран один способ оплаты — не спрашиваем гостя
+    submitOrder(mode === 'counter' ? 'counter' : 'card');
+  }
+}
+
+function payHtml() {
+  const total = Porcia.money(state.payTotal);
+  const mode = state.data.settings.serviceMode;
+  if (state.payStep === 'method' && mode === 'both') {
+    return `<div class="sheet-back"><div class="sheet pay">
+      <h3>Как оплатить?</h3>
+      <p>Заказ можно оплатить здесь картой или на кассе — заказ всё равно сразу уйдёт на кухню.</p>
+      <div style="display:grid;gap:10px;margin-top:22px">
+        <button class="btn btn--accent btn--lg" data-pay="card">Картой на киоске · ${total}</button>
+        <button class="btn btn--lg" data-pay="counter">Оплачу на кассе</button>
+      </div>
+      <button class="btn btn--ghost" style="margin-top:14px" data-close="1">Вернуться в меню</button>
+    </div></div>`;
+  }
+  if (state.payStep === 'processing') {
+    return `<div class="sheet-back"><div class="sheet pay">
+      <div class="cardanim wave"><div class="chip"></div><div class="num">•••• 4821</div><div class="brand">VISA</div></div>
+      <h3 style="margin-top:20px">Приложите карту к терминалу</h3>
+      <p>Обрабатываем платёж, не убирайте карту</p>
+      <div class="amount">${total}</div>
+      <p style="display:flex;justify-content:center;padding:6px"><span class="spinner"></span></p>
+    </div></div>`;
+  }
+  return '';
+}
+
+function renderOverlay() {
+  const box = $('#overlays');
+  if (state.overlay === 'attract') {
+    box.innerHTML = `<div class="attract" data-close="1">
+      <div>
+        <div style="font-size:13px;letter-spacing:.3em;color:#ff9b83">КИОСК САМООБСЛУЖИВАНИЯ</div>
+        <h1 style="margin-top:18px">${Porcia.esc(state.data.settings.kioskTitle)}</h1>
+        <p>${Porcia.esc(state.data.settings.kioskSubtitle)}</p>
+        <div class="touch">👆 Коснитесь экрана, чтобы начать</div>
+        <div class="logos"><span>${Porcia.esc(state.data.settings.address)}</span> · <span>Wi-Fi: PORCIA</span></div>
+      </div>
+    </div>`;
+    bindOverlay();
+    return;
+  }
+  if (state.overlay === 'done') {
+    const o = state.lastOrder;
+    box.innerHTML = `<div class="sheet-back"><div class="sheet pay">
+      <div class="ring" style="background:var(--green-soft)">✓</div>
+      <h3>${o.paid ? 'Оплата прошла' : 'Заказ принят'}</h3>
+      <p>${o.paid ? 'Заберите чек и подойдите к табло выдачи.' : 'Оплатите на кассе — заказ уже на кухне.'}</p>
+      <div style="font-size:13px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.14em;margin-top:24px">Номер вашего заказа</div>
+      <div style="font-size:78px;font-weight:850;letter-spacing:-.05em;line-height:1;font-variant-numeric:tabular-nums">${o.number}</div>
+      <p style="margin-top:6px">Готовность ~${o.etaMinutes || 7} минут. Номер появится на табло выдачи.</p>
+      <div class="receipt">
+        ${o.items.map(i => `<div class="r"><span>${i.qty} × ${Porcia.esc(i.name)}${i.mods && i.mods.length ? ' (' + i.mods.map(m => Porcia.esc(m.name)).join(', ') + ')' : ''}</span><b>${Porcia.money(i.price * i.qty)}</b></div>`).join('')}
+        <div class="r" style="border-top:1px dashed #d9d2c9;margin-top:8px;padding-top:8px"><span>Итого ${o.paid ? '· оплачено' : '· к оплате'}</span><b>${Porcia.money(o.total)}</b></div>
+      </div>
+      <button class="btn btn--accent btn--lg btn--block" style="margin-top:14px" data-neworder="1">Новый заказ</button>
+    </div></div>`;
+    bindOverlay();
+    return;
+  }
+  if (state.overlay === 'pay') {
+    box.innerHTML = payHtml();
+    bindOverlay();
+    return;
+  }
+  if (state.sheet) {
+    box.innerHTML = sheetHtml();
+    bindOverlay();
+    return;
+  }
+  box.innerHTML = '';
+}
+
+function closeOverlay() {
+  state.sheet = null;
+  state.overlay = null;
+  $('#overlays').innerHTML = '';
+}
+
+function bindOverlay() {
+  const box = $('#overlays');
+
+  box.querySelectorAll('[data-close]').forEach(el => { el.onclick = closeOverlay; });
+  const back = box.querySelector('.sheet-back[data-back]');
+  if (back) back.addEventListener('click', (e) => { if (e.target === back) closeOverlay(); });
+
+  // модификаторы
+  box.querySelectorAll('.opt').forEach(btn => {
+    btn.onclick = () => {
+      const { product, sel } = state.sheet;
+      const gid = btn.dataset.g, oid = btn.dataset.o, type = btn.dataset.type;
+      if (type === 'single') sel[gid] = [oid];
+      else {
+        const list = sel[gid] || [];
+        sel[gid] = list.includes(oid) ? list.filter(x => x !== oid) : list.concat(oid);
+      }
+      renderOverlay();
+    };
+  });
+
+  // количество в листе
+  box.querySelectorAll('[data-q]').forEach(btn => {
+    btn.onclick = () => {
+      state.sheet.qty = Math.max(1, Math.min(20, state.sheet.qty + Number(btn.dataset.q)));
+      renderOverlay();
+    };
+  });
+
+  const addBtn = box.querySelector('[data-add]');
+  if (addBtn) addBtn.onclick = () => {
+    addToCart(state.sheet.product, state.sheet.sel, state.sheet.qty);
+    closeOverlay();
+  };
+
+  const newBtn = box.querySelector('[data-neworder]');
+  if (newBtn) newBtn.onclick = () => {
+    state.cart = [];
+    state.lastOrder = null;
+    state.overlay = 'attract';
+    renderCart();
+    renderOverlay();
+  };
+
+  box.querySelectorAll('[data-pay]').forEach(btn => {
+    btn.onclick = () => submitOrder(btn.dataset.pay);
+  });
+}
+
+async function submitOrder(method) {
+  if (state.paying) return;
+  state.paying = true;
+  if (method === 'card') {
+    state.payStep = 'processing';
+    state.payMethod = 'card';
+    renderOverlay();
+  } else {
+    state.payMethod = 'counter';
+  }
+
+  const payload = {
+    items: state.cart.map(l => ({
+      productId: l.productId, qty: l.qty, price: l.price,
+      basePrice: l.basePrice, comboId: l.comboId,
+      mods: l.mods.map(m => ({ groupId: m.groupId, optionId: m.optionId, name: m.name, price: m.price }))
+    })),
+    payMethod: state.payMethod,
+    source: 'kiosk'
+  };
+
+  try {
+    const order = await Porcia.api('POST', '/api/orders', payload);
+    state.lastOrder = order;
+    state.cart = [];
+    state.overlay = 'done';
+    state.payStep = null;
+    renderCart();
+    renderOverlay();
+  } catch (e) {
+    Porcia.toast(e.message, true);
+    state.payStep = null;
+    state.overlay = null;
+    renderOverlay();
+  } finally {
+    state.paying = false;
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кухня (KDS) — ПОРЦИЯ</title>
+<link rel="stylesheet" href="/assets/app.css">
+<style>
+  /* карточка обновляется на месте, без перерисовки колонки */
+  .ticket .timer { transition: background .2s, color .2s; }
+  .ticket .act .btn.busy { opacity: .6; pointer-events: none; }
+  .ticket.flash { animation: ticketFlash .9s ease; }
+  @keyframes ticketFlash { 0% { box-shadow: 0 0 0 2px rgba(238,75,43,.6) } 100% { box-shadow: none } }
+</style>
+</head>
+<body>
+<div class="screen">
+  <header class="screen-head">
+    <div style="display:flex;align-items:center;gap:11px;font-weight:800;font-size:19px;letter-spacing:-.03em">
+      <span style="width:32px;height:32px;border-radius:10px;background:var(--accent);display:grid;place-items:center;font-size:17px">П</span>
+      Кухня
+    </div>
+    <span class="pill pill--live" style="background:#26242f;color:#58d3a0">live</span>
+    <div class="sep"></div>
+    <button class="btn btn--sm" id="soundBtn" style="background:#26242f;color:#cfc7d8;border-color:#37333f">🔔 Звук: вкл</button>
+    <a class="btn btn--sm" href="/board" target="_blank" style="background:#26242f;color:#cfc7d8;border-color:#37333f">Табло выдачи ↗</a>
+    <div style="font-size:22px;font-weight:700;font-variant-numeric:tabular-nums" id="clock">--:--</div>
+  </header>
+
+  <div class="kds">
+    <section class="kds-col">
+      <header><h2>Поступили</h2><span class="count" id="c-new">0</span></header>
+      <div class="kds-list" id="col-new"><div class="empty-col" data-empty="new">Новых заказов нет</div></div>
+    </section>
+    <section class="kds-col">
+      <header><h2>Готовятся</h2><span class="count" id="c-cooking">0</span></header>
+      <div class="kds-list" id="col-cooking"><div class="empty-col" data-empty="cooking">Ничего не готовится</div></div>
+    </section>
+    <section class="kds-col">
+      <header><h2>Готовы к выдаче</h2><span class="count" id="c-ready">0</span></header>
+      <div class="kds-list" id="col-ready"><div class="empty-col" data-empty="ready">Нет заказов на выдаче</div></div>
+    </section>
+  </div>
+</div>
+
+<script src="/assets/api.js"></script>
+<script>
+/* ---------------------------------------------------------------- состояние */
+const COLS = ['new', 'cooking', 'ready'];
+const state = {
+  orders: [],
+  sound: true,
+  rendered: new Map(),   // id заказа -> { el, status, sig }
+  seen: new Set(),
+  readySeen: new Set(),
+  soundArmed: false
+};
+const $ = (s) => document.querySelector(s);
+
+init();
+
+async function init() {
+  const data = await Porcia.api('GET', '/api/state');
+  state.orders = data.orders;
+  state.orders.forEach(o => {
+    state.seen.add(o.id);
+    if (o.status === 'ready') state.readySeen.add(o.id);
+  });
+
+  render();
+  tick();
+  setInterval(tick, 1000);            // только таймеры и часы — без перерисовки карточек
+  setInterval(render, 15000);         // страховочная синхронизация
+
+  Porcia.subscribe((type, payload) => {
+    if (type === 'order' && payload) {
+      const i = state.orders.findIndex(o => o.id === payload.id);
+      if (i >= 0) state.orders[i] = payload; else state.orders.unshift(payload);
+
+      if (!state.seen.has(payload.id)) {
+        state.seen.add(payload.id);
+        if (payload.status !== 'cancelled') beep('new');
+      }
+      if (payload.status === 'ready' && !state.readySeen.has(payload.id)) {
+        state.readySeen.add(payload.id);
+        beep('ready');
+      }
+      // обновляем только эту карточку (или переносим её в другую колонку)
+      upsert(payload, true);
+    }
+    if (type === 'reset') location.reload();
+  });
+
+  // делегирование клика: кнопки не теряются при любых перерисовках
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const { act, id } = btn.dataset;
+    btn.classList.add('busy');
+    try {
+      // ответ сервера применяем сразу, не дожидаясь SSE — интерфейс отзывчивый при любом канале
+      const updated = await Porcia.api('POST', '/api/orders/' + id + '/status', { status: act });
+      const i = state.orders.findIndex(o => o.id === updated.id);
+      if (i >= 0) state.orders[i] = updated; else state.orders.unshift(updated);
+      upsert(updated, true);
+    } catch (err) {
+      Porcia.toast(err.message, true);
+    } finally {
+      btn.classList.remove('busy');
+    }
+  });
+
+  // звук в браузере разрешается только после действия пользователя
+  const armSound = () => {
+    if (state.soundArmed) return;
+    try {
+      state.audio = state.audio || new (window.AudioContext || window.webkitAudioContext)();
+      if (state.audio.state === 'suspended') state.audio.resume();
+      state.soundArmed = true;
+    } catch (err) { /* noop */ }
+  };
+  document.addEventListener('click', armSound, { once: false });
+  document.addEventListener('keydown', armSound);
+
+  $('#soundBtn').onclick = () => {
+    armSound();
+    state.sound = !state.sound;
+    $('#soundBtn').textContent = state.sound ? '🔔 Звук: вкл' : '🔕 Звук: выкл';
+    if (state.sound) beep('new');
+  };
+}
+
+/* --------------------------------------------------------------------- часы */
+function tick() {
+  $('#clock').textContent = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  // таймеры обновляем на месте, DOM не пересобираем
+  state.rendered.forEach((rec) => {
+    const t = rec.el.querySelector('.timer');
+    if (!t) return;
+    const mins = Porcia.minsAgo(rec.createdAt);
+    t.textContent = mins + ' мин';
+    t.className = 'timer ' + (mins >= 9 ? 'bad' : mins >= 5 ? 'warn' : '');
+    rec.el.classList.toggle('late', rec.status !== 'ready' && mins >= 9);
+  });
+}
+
+/* --------------------------------------------------------------------- звук */
+let audioCtx = null;
+function beep(kind) {
+  if (!state.sound) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const now = audioCtx.currentTime;
+    const notes = kind === 'ready' ? [880, 1174] : [660, 880];
+    notes.forEach((f, i) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      gain.gain.setValueAtTime(0.0001, now + i * 0.16);
+      gain.gain.exponentialRampToValueAtTime(0.25, now + i * 0.16 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.16 + 0.2);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now + i * 0.16);
+      osc.stop(now + i * 0.16 + 0.22);
+    });
+  } catch (e) { /* автозвук может быть заблокирован до первого клика */ }
+}
+
+/* ------------------------------------------------------------------- рендер */
+function colOf(o) {
+  if (o.status === 'new' || o.status === 'paid') return 'new';
+  if (o.status === 'cooking') return 'cooking';
+  if (o.status === 'ready') return 'ready';
+  return null;
+}
+
+const ACTIONS = {
+  new: `<button class="btn ghost2" data-act="cancelled" data-id="{id}">Отменить</button>
+        <button class="btn go" data-act="cooking" data-id="{id}">Начать готовить</button>`,
+  cooking: `<button class="btn ghost2" data-act="new" data-id="{id}">Вернуть</button>
+            <button class="btn ok" data-act="ready" data-id="{id}">Готово — на выдачу</button>`,
+  ready: `<button class="btn ghost2" data-act="cooking" data-id="{id}">Вернуть</button>
+          <button class="btn ok" data-act="done" data-id="{id}">Выдан</button>`
+};
+
+function itemsSig(o) {
+  return JSON.stringify([o.status, o.paid, o.items, o.comment]);
+}
+
+function createCard(o, col) {
+  const el = document.createElement('article');
+  el.className = 'ticket';
+  el.dataset.id = o.id;
+  el.innerHTML = `
+    <div class="th">
+      <span class="num">#${o.number}</span>
+      <span class="timer">0 мин</span>
+    </div>
+    <div class="meta">
+      <span class="h-time">${Porcia.time(o.createdAt)}</span>
+      <span class="h-paid"></span>
+      <span class="h-qty"></span>
+    </div>
+    <ul class="h-items"></ul>
+    <div class="act h-act"></div>`;
+  const rec = { el, status: null, sig: null, createdAt: o.createdAt };
+  state.rendered.set(o.id, rec);
+  updateCard(o, rec);
+  return el;
+}
+
+function updateCard(o, rec) {
+  const el = rec.el;
+  const col = colOf(o);
+  const sig = itemsSig(o);
+
+  if (rec.sig !== sig) {
+    el.querySelector('.h-paid').innerHTML = o.paid
+      ? '<b style="color:#58d3a0">оплачен</b>' : 'оплата на кассе';
+    el.querySelector('.h-qty').textContent = o.items.reduce((s, i) => s + i.qty, 0) + ' поз.';
+    el.querySelector('.h-items').innerHTML = o.items.map(i => `<li><span class="q">${i.qty}×</span>
+      <span>${Porcia.esc(i.name)}${i.comboId ? '<span class="mods" style="color:#ffc27a">комбо</span>' : ''}${i.mods && i.mods.length ? `<span class="mods">${i.mods.map(m => Porcia.esc(m.name)).join(' · ')}</span>` : ''}${i.comment ? `<span class="mods">💬 ${Porcia.esc(i.comment)}</span>` : ''}</span></li>`).join('');
+    const commentEl = el.querySelector('.h-comment');
+    if (o.comment) {
+      if (commentEl) commentEl.textContent = '💬 ' + o.comment;
+      else {
+        const d = document.createElement('div');
+        d.className = 'meta h-comment';
+        d.textContent = '💬 ' + o.comment;
+        el.querySelector('.act').before(d);
+      }
+    } else if (commentEl) commentEl.remove();
+    rec.sig = sig;
+  }
+
+  if (rec.status !== o.status) {
+    const tpl = ACTIONS[col] || '';
+    el.querySelector('.h-act').innerHTML = tpl.replace(/\{id\}/g, o.id);
+    rec.status = o.status;
+  }
+
+  rec.createdAt = o.createdAt;
+  el.classList.toggle('late', o.status !== 'ready' && Porcia.minsAgo(o.createdAt) >= 9);
+}
+
+/** Обновить одну карточку без перерисовки всего экрана */
+function upsert(o, flash) {
+  const col = colOf(o);
+  const rec = state.rendered.get(o.id);
+
+  if (!col) { // заказ выдан/отменён — убираем карточку
+    if (rec) { rec.el.remove(); state.rendered.delete(o.id); refreshCounts(); }
+    return;
+  }
+
+  if (!rec) {
+    createCard(o, col);
+    placeInColumn(o);
+    refreshCounts();
+    return;
+  }
+
+  updateCard(o, rec);
+  placeInColumn(o);          // перенос между колонками, если статус изменился
+  if (flash) {
+    rec.el.classList.remove('flash');
+    void rec.el.offsetWidth;
+    rec.el.classList.add('flash');
+  }
+  refreshCounts();
+}
+
+function groupOf(col) {
+  return state.orders
+    .filter(o => colOf(o) === col)
+    .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+}
+
+/** Расставляет карточки колонки в нужном порядке, не трогая уже стоящие на месте */
+function placeInColumn(o) {
+  const col = colOf(o);
+  if (!col) return;
+  const container = $('#col-' + col);
+  const emptyEl = container.querySelector('[data-empty]');
+  groupOf(col).forEach((item, idx) => {
+    let rec = state.rendered.get(item.id);
+    if (!rec) { createCard(item, col); rec = state.rendered.get(item.id); }
+    updateCard(item, rec);
+    const current = container.children[idx];
+    if (current !== rec.el) container.insertBefore(rec.el, current || emptyEl);
+  });
+  if (emptyEl) emptyEl.style.display = groupOf(col).length ? 'none' : '';
+}
+
+function render() {
+  COLS.forEach(col => {
+    const container = $('#col-' + col);
+    const emptyEl = container.querySelector('[data-empty]');
+    const list = groupOf(col);
+
+    // убираем карточки, которых больше нет в этой колонке (выданы, отменены, сменили статус)
+    Array.from(container.children).forEach(ch => {
+      if (ch === emptyEl) return;
+      const o = state.orders.find(x => x.id === ch.dataset.id);
+      if (!o || colOf(o) !== col) { ch.remove(); state.rendered.delete(ch.dataset.id); }
+    });
+
+    list.forEach((o, idx) => {
+      let rec = state.rendered.get(o.id);
+      if (!rec) { createCard(o, col); rec = state.rendered.get(o.id); }
+      updateCard(o, rec);
+      const current = container.children[idx];
+      if (current !== rec.el) container.insertBefore(rec.el, current || emptyEl);
+    });
+
+    if (emptyEl) emptyEl.style.display = list.length ? 'none' : '';
+  });
+  refreshCounts();
+}
+
+function refreshCounts() {
+  COLS.forEach(col => {
+    $('#c-' + col).textContent = groupOf(col).length;
+  });
+}
+</script>
+</body>
+</html>

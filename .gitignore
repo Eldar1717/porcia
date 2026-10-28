@@ -1,0 +1,20 @@
+# зависимости
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# рантайм-данные: заказы и загруженные фото не должны попадать в репозиторий
+data/db.json
+data/db.json.*
+data/uploads/*
+!data/uploads/.gitkeep
+
+# служебное
+.DS_Store
+Thumbs.db
+*.log
+*.pid
+.idea/
+.vscode/
+.env
+.env.*
